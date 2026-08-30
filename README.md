@@ -1,18 +1,9 @@
 # Proxmox VE 9: Full Disk Encryption + custom-only Secure Boot
 
-**English**
-
 Strazh prepares Debian 13 (Trixie) and Proxmox VE 9 with full-disk encryption
 and a custom-only Secure Boot chain. The firmware trusts only the operator's
 own `PK`, `KEK` and `db` certificates. Microsoft, Debian and Proxmox signing
 certificates are not added to the firmware DB.
-
-## License
-
-Strazh is released under the GNU General Public License, version 3 or later.
-See [LICENSE](LICENSE). This license applies to the original Strazh files;
-third-party tools, Debian/Proxmox sources and firmware components retain their
-respective licenses.
 
 ## Security profile
 
@@ -359,3 +350,10 @@ systemctl status sb-guard.path sb-guard.timer
 
 The expected final state is `phase=complete`, all pipeline stages complete,
 `secure_boot=enabled`, and `RESULT: OK (full)` from the strict verifier.
+
+## License
+
+Strazh is released under the GNU General Public License, version 3 or later.
+See [LICENSE](LICENSE). This license applies to the original Strazh files;
+third-party tools, Debian/Proxmox sources and firmware components retain their
+respective licenses.
