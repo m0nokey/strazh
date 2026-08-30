@@ -1493,7 +1493,7 @@ run_fde_stage() {
     RUNNING_PHASE=fde_running
     if run_quiet_step 'FDE: migrate /boot and prepare LUKS2' \
         run_external bash "$FDE_IMPLEMENTATION"; then
-        log "FDE passphrase unlock test passed; the encrypted root is ready for reboot verification."
+        log "FDE passphrase tests passed before and after migration; the encrypted root is ready for reboot verification."
     else
         local rc=$?
         record_error "$rc"

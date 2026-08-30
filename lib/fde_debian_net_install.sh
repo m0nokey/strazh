@@ -516,11 +516,10 @@ ensure_keyfile_slot_once() {
     update-initramfs -u -k all
 }
 
-verify_human_passphrase_once() {
-    local luks_dev="$1" was_xtrace=0
+test_human_passphrase_once() {
+    local luks_dev="$1" success_message="${2:-Human LUKS passphrase unlock test passed}" was_xtrace=0
 
-    prompt_luks_pass_once "Enter root LUKS passphrase again (final unlock test): "
-    [[ -n "${luks_pass:-}" ]] || die "The existing LUKS passphrase is unavailable for the final unlock test."
+    [[ -n "${luks_pass:-}" ]] || die "The LUKS passphrase is unavailable for the unlock test."
 
     # cryptsetup --test-passphrase validates the supplied key without creating
     # a second mapper or touching encrypted data.  Disable xtrace while the
@@ -532,10 +531,18 @@ verify_human_passphrase_once() {
     if ! printf '%s' "$luks_pass" |
         cryptsetup open --test-passphrase "$luks_dev" --key-file - --batch-mode >/dev/null 2>&1; then
         (( was_xtrace )) && set -x
-        die "The existing LUKS passphrase failed the final unlock test; reboot cancelled."
+        die "The LUKS passphrase failed the unlock test; stopping before the next migration step."
     fi
     (( was_xtrace )) && set -x
-    log "Human LUKS passphrase unlock test passed (no mapping created)."
+    log "$success_message (no mapping created)."
+}
+
+verify_human_passphrase_once() {
+    local luks_dev="$1"
+
+    prompt_luks_pass_once "Enter root LUKS passphrase again (final unlock test): "
+    test_human_passphrase_once "$luks_dev" \
+        "Final human LUKS passphrase unlock test passed"
 }
 
 # ====== DESTRUCTIVE: WIPE/DELETE OLD BOOT PARTITION ======
@@ -790,6 +797,8 @@ main() {
     ensure_grub_cryptodisk
 
     prompt_luks_pass_once "Enter EXISTING root LUKS passphrase (for adding slots): "
+    test_human_passphrase_once "$root_luks" \
+        "Initial human LUKS passphrase unlock test passed before destructive changes"
     ensure_pbkdf2_slot_for_grub_once "$root_luks"
 
     move_boot_into_root "${boot_dev:-}"
