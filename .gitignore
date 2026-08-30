@@ -1,0 +1,22 @@
+# Never commit locally generated trust material or recovery exports.
+.DS_Store
+*.key
+*.pem
+*.csr
+*.der
+*.auth
+*.esl
+owner_guid
+key.fpr
+
+# Runtime/build artifacts.
+*.log
+*.bak
+*.tmp
+*.stage
+*.efi
+*.sig
+*.state
+release/
+build/out/
+build/profile/
