@@ -63,6 +63,11 @@ provision_dependencies() {
 
 build_no_network() {
     local root="$1"
+    local source_date_epoch="${SOURCE_DATE_EPOCH:-}"
+    if [[ -n "$source_date_epoch" && ! "$source_date_epoch" =~ ^[0-9]+$ ]]; then
+        die "SOURCE_DATE_EPOCH must be an unsigned integer when set"
+    fi
+    SOURCE_DATE_EPOCH="$source_date_epoch" \
     unshare --mount --net --fork -- chroot "$root" /bin/bash -Eeuo pipefail -c '
         # Use a locale guaranteed by the Debian base system rather than a host
         # LANG such as en_US.UTF-8, which otherwise makes Perl warn during

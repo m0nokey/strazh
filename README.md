@@ -297,6 +297,40 @@ The exact verified release bundle is kept at:
 /var/lib/sb-guard/release/grubx64.efi
 ```
 
+## Continuous integration
+
+Every pull request runs the fast, non-destructive checks:
+
+- `static`: Bash syntax, ShellCheck, four-space `shfmt`, whitespace, secret and
+  generated-file checks, plus pinned Proxmox key/source provenance checks;
+- `ui`: the real menu renderer in a pseudo-TTY, including colors, alignment,
+  English-only text, `x`, `?`, `y/n` and Enter/Space handling;
+- `logic`: atomic state updates, stale reboot markers, lock release after a
+  failed child and descriptor isolation;
+- `fde`: a disposable loopback LUKS2 container with a long one-run test
+  passphrase, PBKDF2 human slot, Argon2id keyfile slot and both unlock checks;
+- `artifact-contract`: static assertions for the GRUB/shim/SBAT/GPG and
+  single-signature contract.
+
+The full GRUB and custom shim source build runs on pushes to `main`, through
+`workflow_dispatch`, and weekly. It uses a privileged disposable Debian
+Trixie container, pinned Proxmox keyring metadata, temporary CI signing keys,
+an empty network namespace during compilation, two identical
+`SOURCE_DATE_EPOCH` builds, and no ESP or production key material. GitHub's
+public runner is suitable for this build; a real firmware enrollment and boot
+test still require a physical host or UEFI virtual machine.
+
+Run the fast checks locally with:
+
+```bash
+bash tests/check_static.sh
+bash tests/check_ui.sh
+bash tests/check_logic.sh
+bash tests/check_provenance.sh
+bash tests/check_artifact_contract.sh
+sudo bash tests/check_fde_loopback.sh
+```
+
 ## Reboots and recovery
 
 The installer asks before every required reboot and prints what has completed,

@@ -18,20 +18,14 @@ PBKDF2_ITER_TIME_MS="${STRAZH_PBKDF2_ITER_TIME_MS:-5000}"
 if [[ -t 1 ]]; then
     BLUE=$'\033[38;5;117m'
     WHITE=$'\033[97m'
-    GRAY=$'\033[38;5;245m'
     MUTED_ITALIC=$'\033[3;38;5;245m'
-    SUCCESS=$'\033[32m'
     WARN=$'\033[38;5;221m'
-    DANGER=$'\033[31m'
     RESET=$'\033[0m'
 else
     BLUE=''
     WHITE=''
-    GRAY=''
     MUTED_ITALIC=''
-    SUCCESS=''
     WARN=''
-    DANGER=''
     RESET=''
 fi
 

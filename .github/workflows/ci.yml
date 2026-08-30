@@ -1,0 +1,81 @@
+name: Strazh CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '30 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install analyzers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck shfmt ripgrep
+      - name: Run static and provenance checks
+        run: |
+          bash tests/check_static.sh
+          bash tests/check_provenance.sh
+          bash tests/check_artifact_contract.sh
+
+  ui:
+    name: Terminal UI checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Run pseudo-TTY UI checks
+        run: bash tests/check_ui.sh
+
+  logic:
+    name: State and lock checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Run state-machine checks
+        run: bash tests/check_logic.sh
+
+  fde:
+    name: Disposable FDE loopback
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install cryptsetup
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cryptsetup util-linux
+      - name: Verify LUKS2 PBKDF2 and keyfile paths
+        run: sudo bash tests/check_fde_loopback.sh
+
+  artifacts:
+    name: GRUB and shim source build
+    runs-on: ubuntu-latest
+    # A full source build needs a privileged disposable container for the
+    # network/mount namespaces used by the isolated Trixie build root. It is
+    # intentionally run on main, manually, and on the weekly schedule rather
+    # than for every pull request.
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Build and verify disposable EFI artifacts
+        run: |
+          docker run --privileged --rm \
+            -e SOURCE_DATE_EPOCH=946684800 \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            debian:trixie \
+            bash tests/build_artifacts.sh

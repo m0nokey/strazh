@@ -381,6 +381,7 @@ copy_source_into_chroot() {
 
 run_build_no_network() {
     local root="$1" export_dir="$2" source_deb_version="$3" upstream_version="$4"
+    local source_date_epoch="${SOURCE_DATE_EPOCH:-}"
     need unshare
     need chroot
     # There is no network interface during compilation.  The source and
@@ -394,7 +395,11 @@ run_build_no_network() {
         die "Unsafe source package version for SBAT generation: $source_deb_version"
     [[ "$upstream_version" =~ ^[0-9A-Za-z.+:~_-]+$ ]] ||
         die "Unsafe upstream version for SBAT generation: $upstream_version"
+    if [[ -n "$source_date_epoch" && ! "$source_date_epoch" =~ ^[0-9]+$ ]]; then
+        die "SOURCE_DATE_EPOCH must be an unsigned integer when set"
+    fi
     GRUB_DEB_VERSION="$source_deb_version" GRUB_UPSTREAM_VERSION="$upstream_version" \
+    SOURCE_DATE_EPOCH="$source_date_epoch" \
     unshare --net --fork -- chroot "$root" /bin/bash -Eeuo pipefail -c '
         # Keep generated-tool output deterministic and avoid inheriting a host
         # locale that is not installed in the minimal Trixie root.  The GRUB
