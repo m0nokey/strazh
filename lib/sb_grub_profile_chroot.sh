@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 m0nokey
 # Shared cached Debian Trixie build root for a reproducible GRUB profile.
 #
 # This helper never sees Secure Boot private keys, /boot, /boot/efi, or UEFI

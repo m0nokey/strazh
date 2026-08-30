@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 m0nokey
 # Private implementation invoked by the public ../run.sh entry point.
 set -Eeuo pipefail
 IFS=$'\n\t'

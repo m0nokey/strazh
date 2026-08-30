@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 m0nokey
 # Shared cached Debian Trixie build root for the Proxmox shim source.
 #
 # The source build is deliberately separate from signing: this helper receives

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 m0nokey
 # Shared Debian Trixie build root for the GRUB and shim source builders.
 #
 # The base root is provisioned once with the union of both projects' build

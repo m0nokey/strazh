@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 m0nokey
 # Resolve and build the exact Proxmox shim source matching shim-unsigned.
 # This helper never invokes host APT and never writes the ESP. Compilation is
 # delegated to sb-shim-source-chroot, which uses the shared cached Trixie root.

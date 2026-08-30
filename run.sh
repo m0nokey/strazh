@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 m0nokey
 # Strazh: one idempotent run.sh entry point for the four installation stages.
 #
 # The implementation files under lib/ are private building blocks. This file
