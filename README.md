@@ -124,9 +124,9 @@ launch, the same `bash ./run.sh` command reads the saved state and continues
 from the first incomplete stage. Use `bash ./run.sh --menu` only when manual
 stage selection is needed.
 
-The installer does not require a separate `strazh` source file. The host
-administration utility is embedded in `run.sh`; during installation Strazh
-validates it and installs a copy at `/usr/local/sbin/strazh`.
+The host administration utility is kept as `lib/strazh_host_cli.sh`. During
+installation Strazh validates that file, stages it atomically and installs a
+copy at `/usr/local/sbin/strazh`.
 
 ## Installer menu
 
@@ -323,7 +323,7 @@ bash ./run.sh --debug
 
 ## Host administration utility
 
-After installation, use the embedded and exported `strazh` command. It remains
+After installation, use the installed and exported `strazh` command. It remains
 available even if `/root/strazh` is later removed:
 
 ```bash
@@ -431,7 +431,8 @@ Manual maintenance commands:
 The public project contains one entry point and private implementation files:
 
 ```text
-run.sh                         # menu, state machine and embedded host utility
+run.sh                         # menu and resumable installation state machine
+lib/strazh_host_cli.sh         # exported host administration utility
 lib/fde_debian_net_install.sh  # Debian FDE implementation
 lib/sb_proxmox.sh              # Proxmox package/kernel stage
 lib/sb_guard_install.sh        # sb-guard lifecycle installer
