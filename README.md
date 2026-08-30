@@ -104,19 +104,18 @@ then run the single public entry point as `root`:
 With Git:
 
 ```bash
-git clone https://github.com/m0nokey/strazh.git /root/strazh
-cd /root/strazh
-bash ./run.sh
+git clone https://github.com/m0nokey/strazh.git /root/strazh \
+&& cd /root/strazh \
+&& bash ./run.sh
 ```
 
 Without Git:
 
 ```bash
-install -d -m 0700 /root/strazh
-curl -fsSL https://github.com/m0nokey/strazh/archive/refs/heads/main.tar.gz \
-  | tar -xz --strip-components=1 -C /root/strazh
-cd /root/strazh
-bash ./run.sh
+install -d -m 0700 /root/strazh \
+&& curl -fsSL https://github.com/m0nokey/strazh/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1 -C /root/strazh \
+&& cd /root/strazh \
+&& bash ./run.sh
 ```
 
 The first launch shows the menu. Choose `6` to let Strazh select the next
