@@ -44,14 +44,25 @@ validate_paths() {
 }
 
 copy_source() {
-    local source="$1" root="$2"
+    local source="$1" root="$2" cert_der
+    cert_der="$root/build/input/db.crt.der"
     rm -rf -- "$root/build/source" "$root/build/input" "$root/build/out"
     install -d -m 0700 "$root/build/source" "$root/build/input" "$root/build/out"
     # The source is required to be a git checkout by the caller.  Git metadata
     # is not needed inside the build and is excluded from the input tree.
     tar -C "$source" --exclude=.git --exclude=.gitmodules -cf - . |
         tar -C "$root/build/source" -xf -
-    install -m 0644 "$DB_CRT" "$root/build/input/db.crt"
+    # efi-boot-shim's Makefile requires VENDOR_CERT_FILE in DER format. The
+    # host keeps db.crt as PEM for OpenSSL/sb-guard, while callers may also
+    # provide an already-DER certificate; normalize both forms at the build
+    # boundary and never copy a private key into the chroot.
+    if ! openssl x509 -in "$DB_CRT" -inform PEM -outform DER \
+        -out "$cert_der" >/dev/null 2>&1 \
+        && ! openssl x509 -in "$DB_CRT" -inform DER -outform DER \
+            -out "$cert_der" >/dev/null 2>&1; then
+        die "Public certificate is not a valid X509 PEM/DER file: $DB_CRT"
+    fi
+    chmod 0644 "$cert_der"
     chown -R root:root "$root/build/source" "$root/build/input" "$root/build/out"
 }
 
@@ -80,7 +91,7 @@ build_no_network() {
         cd /build/source
         [[ -f debian/rules ]] || { echo "missing debian/rules" >&2; exit 1; }
         debian/rules clean
-        debian/rules cert=/build/input/db.crt binary
+        debian/rules cert=/build/input/db.crt.der binary
         [[ -s shimx64.efi ]] || { echo "shim source build produced no shimx64.efi" >&2; exit 1; }
         install -m 0600 shimx64.efi /build/out/shimx64.efi
         rm -rf -- /build/tmp
@@ -112,7 +123,7 @@ OUTPUT="$3"
 [[ -s "$DB_CRT" ]] || die "Missing public db certificate: $DB_CRT"
 [[ "$OUTPUT" = /* ]] || die "Output path must be absolute: $OUTPUT"
 validate_paths
-for cmd in awk chown chroot cp df dirname dpkg-parsechangelog find flock install mkdir rm sed sha256sum stat tar unshare; do need "$cmd"; done
+for cmd in awk chown chroot cp df dirname dpkg-parsechangelog find flock install mkdir openssl rm sed sha256sum stat tar unshare; do need "$cmd"; done
 [[ -x "$BUILD_ROOT_HELPER" ]] || die "Missing shared build-root helper: $BUILD_ROOT_HELPER"
 
 source_version="$(cd "$SOURCE_DIR" && dpkg-parsechangelog -S Version 2>/dev/null || true)"
