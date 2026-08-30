@@ -47,6 +47,53 @@ with custom-only EFI files before enrolling `db.crt`.
 The installer targets x86_64 UEFI systems with GOP. Legacy BIOS/CSM, non-x86
 architectures and firmware without GOP require a separate platform profile.
 
+## Install Debian netinst first
+
+Strazh is not a Debian ISO installer. Start with a clean Debian 13 (Trixie)
+netinst installation, then run Strazh on the installed system.
+
+Boot the installer in UEFI mode on a GPT disk. Keep firmware Secure Boot
+disabled during installation; the custom certificates are enrolled later.
+In Debian Installer use these exact screens and choices:
+
+1. `Configure the network` → `Hostname`: enter the hostname for this server.
+2. In `Set up users and passwords`:
+   - at `Root password:`, enter the password for the `root` account;
+   - at `Re-enter password to verify:`, enter the same root password;
+   - at `Create a normal user account now?`, choose `No`.
+3. Under `Partition disks`, choose `Guided - use entire disk and set up encrypted LVM`.
+4. Select the target system disk.
+5. Choose `All files in one partition (recommended for new users)`.
+6. When prompted for the encryption passphrase, enter it and confirm it.
+7. Choose `Finish partitioning and write changes to disk`, then confirm
+   `Write the changes to disks?` with `Yes`.
+8. In `Software selection`, select only:
+
+   ```text
+   [x] SSH server
+   [x] standard system utilities
+   [ ] every other task
+   ```
+
+9. When prompted `Install the GRUB boot loader`, choose `Yes`.
+10. At `Device for boot loader installation`, choose the target system disk so
+    GRUB is installed to that disk's UEFI System Partition.
+
+This is a root-only base installation: `Create a normal user account now?` is
+answered `No`, so no ordinary login user is created. Add one later with
+`adduser` only if the host needs a separate day-to-day account.
+
+`All files in one partition` creates one root LV inside the encrypted LVM;
+swap is created as a separate LV. Separate `/home`, `/var` and `/tmp`
+partitions are not required. Keeping one root filesystem makes it possible for
+Stage 1 to move `/boot` into the encrypted root.
+
+After the first Debian boot, verify that networking works, that you have a root
+shell, and that the FAT32 ESP is mounted at `/boot/efi`. Debian Installer may
+leave `/boot` as a separate plaintext partition; this is expected before Stage
+1. Strazh copies it into the encrypted root, verifies the new layout and only
+then removes the old partition.
+
 ## Quick start
 
 Install a minimal Debian 13 system first. Keep firmware Secure Boot disabled,
