@@ -18,9 +18,21 @@ cd -- "$ROOT_DIR"
 export DEBIAN_FRONTEND=noninteractive
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-946684800}"
 
-# Keep the disposable container's Debian bootstrap on HTTPS as well. The
-# production helpers reject plaintext Debian mirrors; CI should exercise the
-# same transport policy from its first package transaction.
+# The minimal Debian image has no CA bundle before its first package
+# transaction. Bootstrap only ca-certificates over the image's official Debian
+# HTTP mirror, then switch every subsequent operation to HTTPS. The production
+# helpers reject plaintext Debian mirrors; this is the narrow bootstrap
+# exception needed to establish TLS trust in a blank container.
+if [[ -f /etc/apt/sources.list.d/debian.sources ]]; then
+    sed -i \
+        -e 's|https://deb.debian.org/debian|http://deb.debian.org/debian|g' \
+        -e 's|https://security.debian.org/debian-security|http://security.debian.org/debian-security|g' \
+        /etc/apt/sources.list.d/debian.sources
+fi
+
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates
+
 if [[ -f /etc/apt/sources.list.d/debian.sources ]]; then
     sed -i \
         -e 's|http://deb.debian.org/debian|https://deb.debian.org/debian|g' \
@@ -30,7 +42,7 @@ fi
 
 apt-get update
 apt-get install -y --no-install-recommends \
-    ca-certificates curl gnupg git dpkg-dev mmdebstrap \
+    curl gnupg git dpkg-dev mmdebstrap \
     binutils openssl sbsigntool util-linux xz-utils
 
 # Reuse the exact key URL, digest and fingerprint enforced by the production
