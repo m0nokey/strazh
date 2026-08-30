@@ -125,13 +125,13 @@ modules are on the LUKS-backed root LV. Linux kernel modules under
 For example, a completed layout looks like this:
 
 ```text
-NAME                    MAJ:MIN RM        SIZE RO TYPE  MOUNTPOINTS
-sda                       8:0    0 34359738368  0 disk
-├─sda1                    8:1    0  1023410176  0 part  /boot/efi
-└─sda3                    8:3    0 32309772288  0 part
-  └─sda3_crypt          252:0    0 32292995072  0 crypt
-    ├─debian--vg-root   252:1    0 30589059072  0 lvm   /
-    └─debian--vg-swap_1 252:2    0  1702887424  0 lvm   [SWAP]
+NAME                    FSTYPE      MOUNTPOINTS
+sda
+├─sda1                  vfat        /boot/efi
+└─sda3                  crypto_LUKS
+  └─sda3_crypt          LVM2_member
+    ├─debian--vg-root   ext4        /
+    └─debian--vg-swap_1 swap        [SWAP]
 ```
 
 The only unencrypted filesystem is the ESP required by UEFI. It contains
@@ -146,6 +146,7 @@ public, custom-signed bootloaders only:
 Verify the mount ownership and encrypted payload with:
 
 ```bash
+lsblk -o NAME,FSTYPE,MOUNTPOINTS
 findmnt -T /boot -o SOURCE,FSTYPE,TARGET,OPTIONS
 findmnt -T /lib/modules -o SOURCE,FSTYPE,TARGET,OPTIONS
 findmnt -T /boot/efi -o SOURCE,FSTYPE,TARGET,OPTIONS
