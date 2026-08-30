@@ -52,8 +52,18 @@ architectures and firmware without GOP require a separate platform profile.
 Install a minimal Debian 13 system first. Keep firmware Secure Boot disabled,
 then run the single public entry point as `root`:
 
+With Git:
+
 ```bash
 git clone https://github.com/m0nokey/strazh.git /root/strazh
+cd /root/strazh
+bash ./run.sh
+```
+
+Without Git:
+
+```bash
+curl -fsSL https://github.com/m0nokey/strazh/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1 -C /root/strazh
 cd /root/strazh
 bash ./run.sh
 ```
