@@ -58,7 +58,11 @@ repo_uri="$(sed -n 's/^PVE_REPO_URI="${PVE_REPO_URI:-\(.*\)}"$/\1/p' lib/sb_prox
 test_root="$(mktemp -d -p /tmp strazh-artifacts.XXXXXX)"
 cleanup() { rm -rf --one-file-system "$test_root"; }
 trap cleanup EXIT
-install -d -m 0700 /etc/apt/keyrings /var/lib/sb-guard/keys
+# APT verifies repository metadata as the unprivileged `_apt` user.  The
+# keyring is public verification material, so both its directory and file must
+# be traversable/readable by that helper even though all private CI keys remain
+# mode 0400 in the disposable container.
+install -d -m 0755 /etc/apt/keyrings /var/lib/sb-guard/keys
 
 curl -4 -fsSL --proto '=https' --tlsv1.3 --retry 5 \
     --connect-timeout 15 --max-time 90 "$key_url" -o "$test_root/proxmox-key.gpg"
@@ -70,6 +74,7 @@ fingerprints="$(gpg --batch --no-options --homedir "$test_root/gnupg" \
 grep -Fqx "$key_fingerprint" <<<"$fingerprints"
 gpg --batch --no-options --yes --dearmor \
     --output /etc/apt/keyrings/proxmox-release-trixie.gpg "$test_root/proxmox-key.gpg"
+chmod 0644 /etc/apt/keyrings/proxmox-release-trixie.gpg
 
 cat >/etc/apt/sources.list.d/proxmox-ci.sources <<EOF
 Types: deb
