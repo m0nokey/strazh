@@ -1,11 +1,19 @@
 # Never commit locally generated trust material or recovery exports.
 .DS_Store
+.git/
 *.key
 *.pem
 *.csr
+*.crt
+*.cer
 *.der
 *.auth
 *.esl
+*.gpg
+*.gpg~
+*.p12
+*.pfx
+*.p7b
 owner_guid
 key.fpr
 
@@ -17,6 +25,14 @@ key.fpr
 *.efi
 *.sig
 *.state
+*.deb
+*.dsc
+*.changes
+*.buildinfo
+*.orig
+*.rej
+*.swp
+*.swo
 release/
 build/out/
 build/profile/

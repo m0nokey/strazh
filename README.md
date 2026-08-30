@@ -338,6 +338,37 @@ the FDE stage. The firmware DB contains only the custom certificates selected
 by the operator; automatic `dbx` revocation updates are intentionally outside
 the pipeline.
 
+## Operational hardening and incident response
+
+Strazh protects the boot chain, but platform and out-of-band management
+security must be configured by the operator.
+
+Before production:
+
+- update UEFI/BIOS, BMC/IPMI, RAID, NIC and other device firmware to the
+  latest vendor-supported security releases;
+- verify vendor signatures or hashes and keep recovery copies;
+- set a unique UEFI administrator password;
+- disable unused USB, Thunderbolt, external boot and PXE features;
+- enable DMA protection/IOMMU where supported;
+- place BMC/IPMI on a dedicated management VLAN or VPN;
+- restrict BMC access with firewall ACLs and disable public exposure;
+- replace default BMC credentials and install a trusted BMC TLS certificate;
+- disable unused BMC services, virtual media and IPMI-over-LAN when not
+  needed.
+
+BMC/IPMI certificates are a separate trust domain. They are not the Strazh
+Secure Boot `PK`, `KEK` or `db` certificates and must not be reused.
+
+During an incident, isolate the BMC network first, preserve BMC and UEFI logs,
+and keep a tested physical or remote recovery console available. BMC/IPMI may
+remain available while the host operating system is powered off because the
+management controller can use standby power; disabling host ports does not
+disable the BMC management path. See the [DMTF Redfish
+specification](https://www.dmtf.org/sites/default/files/standards/documents/DSP0268_2019.3.pdf)
+and [NIST SP 800-147B](https://nvlpubs.nist.gov/nistpubs/specialpublications/nist.sp.800-147b.pdf)
+for the out-of-band management model.
+
 ## Verification checklist
 
 ```bash
