@@ -42,7 +42,7 @@ fi
 
 apt-get update
 apt-get install -y --no-install-recommends \
-    curl gnupg git dpkg-dev mmdebstrap \
+    curl gnupg gpgv git dpkg-dev mmdebstrap \
     binutils openssl sbsigntool util-linux xz-utils
 
 # Reuse the exact key URL, digest and fingerprint enforced by the production
