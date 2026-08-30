@@ -112,7 +112,9 @@ bash ./run.sh
 Without Git:
 
 ```bash
-curl -fsSL https://github.com/m0nokey/strazh/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1 -C /root/strazh
+install -d -m 0700 /root/strazh
+curl -fsSL https://github.com/m0nokey/strazh/archive/refs/heads/main.tar.gz \
+  | tar -xz --strip-components=1 -C /root/strazh
 cd /root/strazh
 bash ./run.sh
 ```
