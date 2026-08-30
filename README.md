@@ -162,7 +162,10 @@ diagnosing a failure.
 Strazh detects the root LUKS device, asks for the existing root LUKS
 passphrase, creates or verifies a GRUB-compatible LUKS2/PBKDF2 slot, moves
 `/boot` into the encrypted root filesystem, configures the keyfile and rebuilds
-the initramfs and GRUB. A preflight verifies the layout before the reboot.
+the initramfs and GRUB. Before the stage is marked ready, Strazh asks for the
+human passphrase again and tests it with `cryptsetup --test-passphrase` (no
+mapper is created), then verifies the keyfile unlock as well. A preflight
+verifies the layout before the reboot.
 
 The old plaintext `/boot` partition is wiped and removed only after the copied
 tree, mounts, initramfs and GRUB checks succeed. The screen ends with:
@@ -174,6 +177,8 @@ Reboot now? [y/n]
 ```
 
 Answer `y` to reboot or `n` to stop safely. The state is already saved.
+The reboot is required even when both unlock tests pass: it verifies the real
+firmware → GRUB → LUKS → initramfs path before Proxmox packages are installed.
 
 #### Verifying the encrypted boot layout
 

@@ -516,6 +516,28 @@ ensure_keyfile_slot_once() {
     update-initramfs -u -k all
 }
 
+verify_human_passphrase_once() {
+    local luks_dev="$1" was_xtrace=0
+
+    prompt_luks_pass_once "Enter root LUKS passphrase again (final unlock test): "
+    [[ -n "${luks_pass:-}" ]] || die "The existing LUKS passphrase is unavailable for the final unlock test."
+
+    # cryptsetup --test-passphrase validates the supplied key without creating
+    # a second mapper or touching encrypted data.  Disable xtrace while the
+    # secret is passed through stdin so it can never appear in diagnostics.
+    if [[ "${-}" == *x* ]]; then
+        was_xtrace=1
+        set +x
+    fi
+    if ! printf '%s' "$luks_pass" |
+        cryptsetup open --test-passphrase "$luks_dev" --key-file - --batch-mode >/dev/null 2>&1; then
+        (( was_xtrace )) && set -x
+        die "The existing LUKS passphrase failed the final unlock test; reboot cancelled."
+    fi
+    (( was_xtrace )) && set -x
+    log "Human LUKS passphrase unlock test passed (no mapping created)."
+}
+
 # ====== DESTRUCTIVE: WIPE/DELETE OLD BOOT PARTITION ======
 wipe_partition_noise_plain() {
     local part="$1" wipe_bytes
@@ -797,6 +819,7 @@ main() {
         ensure_keyfile_slot_once "$root_luks"
     fi
 
+    verify_human_passphrase_once "$root_luks"
     unset -v luks_pass
     self_check
 
