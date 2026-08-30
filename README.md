@@ -115,6 +115,51 @@ Reboot now? [y/n]
 
 Answer `y` to reboot or `n` to stop safely. The state is already saved.
 
+#### Verifying the encrypted boot layout
+
+After the FDE stage, `/boot` must no longer be a separate partition. The root
+filesystem, `/boot`, all kernels, initrds, GRUB configuration and GRUB runtime
+modules are on the LUKS-backed root LV. Linux kernel modules under
+`/lib/modules/<version>/` are on the same encrypted root filesystem.
+
+For example, a completed layout looks like this:
+
+```text
+NAME                    MAJ:MIN RM        SIZE RO TYPE  MOUNTPOINTS
+sda                       8:0    0 34359738368  0 disk
+├─sda1                    8:1    0  1023410176  0 part  /boot/efi
+└─sda3                    8:3    0 32309772288  0 part
+  └─sda3_crypt          252:0    0 32292995072  0 crypt
+    ├─debian--vg-root   252:1    0 30589059072  0 lvm   /
+    └─debian--vg-swap_1 252:2    0  1702887424  0 lvm   [SWAP]
+```
+
+The only unencrypted filesystem is the ESP required by UEFI. It contains
+public, custom-signed bootloaders only:
+
+```text
+/boot/efi/EFI/proxmox/
+├── grubx64.efi
+└── shimx64.efi
+```
+
+Verify the mount ownership and encrypted payload with:
+
+```bash
+findmnt -T /boot -o SOURCE,FSTYPE,TARGET,OPTIONS
+findmnt -T /lib/modules -o SOURCE,FSTYPE,TARGET,OPTIONS
+findmnt -T /boot/efi -o SOURCE,FSTYPE,TARGET,OPTIONS
+ls -l /boot/vmlinuz-* /boot/initrd.img-*
+find /lib/modules -type f -name '*.ko*' -print | head
+cryptsetup luksDump /dev/sda3
+```
+
+`/boot` and `/lib/modules` must resolve to the mapped root LV, while
+`/boot/efi` resolves to the small FAT32 ESP. `luksDump` must report LUKS2 and
+the GRUB-compatible PBKDF2 keyslot. This is full disk encryption for the
+operating-system payload: the ESP remains plaintext by UEFI design, and its
+integrity is enforced by the custom-only Secure Boot signatures.
+
 ### 2. Proxmox VE
 
 After reboot into Debian, run the same command again:
