@@ -20,13 +20,13 @@ CUSTOM_ARTIFACT="$CUSTOM_DIR/shimx64.efi"
 CUSTOM_STATE="$CUSTOM_DIR/shim.state"
 UNSIGNED_SHIM="${UNSIGNED_SHIM:-/usr/lib/shim/shimx64.efi}"
 CUSTOM_BUILDER="${CUSTOM_BUILDER:-/usr/local/sbin/sb-shim-build-custom}"
-SOURCE_REPO="${SOURCE_REPO:-https://git.proxmox.com/git/efi-boot-shim.git}"
 SOURCE_CACHE_ROOT="${SOURCE_CACHE_ROOT:-$STATE_ROOT/source-cache}"
 BUILD_ROOT_HELPER="${BUILD_ROOT_HELPER:-/usr/local/sbin/sb-build-root}"
 WORK_PARENT="${WORK_PARENT:-/var/tmp}"
 LOCK_FILE="${LOCK_FILE:-/run/sb-shim-build.lock}"
 GLOBAL_LOCK_FILE="${GLOBAL_LOCK_FILE:-/run/sb-guard.lock}"
 FORCE_BUILD=0
+readonly SOURCE_REPO="https://git.proxmox.com/git/efi-boot-shim.git"
 
 # ==============================================================================
 # Helpers
@@ -64,6 +64,14 @@ package_version() { dpkg-query -W -f='${Version}\n' shim-unsigned 2>/dev/null | 
 package_sha() { sha256sum "$UNSIGNED_SHIM" | awk '{print $1}'; }
 cert_fp() { openssl x509 -in "$DB_CRT" -noout -fingerprint -sha256 | sed 's/^sha256 Fingerprint=//'; }
 
+source_tree_sha256() {
+    {
+        find "$1" -type f -not -path '*/.git/*' \
+            -not -path '*/debian/tmp/*' -not -path '*/debian/.debhelper/*' \
+            -print0 | sort -z | xargs -0r sha256sum
+    } | sha256sum | awk '{print $1}'
+}
+
 artifact_vendor_ok() (
     local tmp db_der section dumped der_size strings_output
     tmp="$(mktemp -d -p "$STATE_ROOT" .shim-auto-check.XXXXXX 2>/dev/null)" || return 1
@@ -82,14 +90,32 @@ artifact_vendor_ok() (
 )
 
 custom_ready() {
-    local ver sha fp actual
+    local ver sha fp actual commit source_remote_value source_ref_value source_tree_value
+    local source_cache source_cache_version source_cache_commit source_cache_remote source_cache_tree
     [[ -s "$CUSTOM_ARTIFACT" && -s "$CUSTOM_STATE" && -s "$DB_CRT" && -s "$DB_KEY" ]] || return 1
     ver="$(package_version)"; sha="$(package_sha)"; fp="$(cert_fp)"
     [[ "$(state_get mode)" == custom-built ]] || return 1
     [[ "$(state_get source_package_version)" == "$ver" ]] || return 1
     [[ "$(state_get source_package_sha256)" == "$sha" ]] || return 1
     [[ "$(state_get source_tree_version)" == "$ver" ]] || return 1
-    [[ "$(state_get source_git_commit)" =~ ^[[:xdigit:]]{40}$ ]] || return 1
+    commit="$(state_get source_git_commit)"
+    [[ "$commit" =~ ^[[:xdigit:]]{40}$ ]] || return 1
+    source_remote_value="$(state_get source_remote)"
+    source_ref_value="$(state_get source_ref)"
+    source_tree_value="$(state_get source_tree_sha256)"
+    [[ "$source_remote_value" == "$SOURCE_REPO" ]] || return 1
+    [[ "$source_ref_value" =~ ^proxmox/trixie-[0-9A-Za-z.+:~_-]+$ ]] || return 1
+    [[ "$source_tree_value" =~ ^[[:xdigit:]]{64}$ ]] || return 1
+    source_cache="$SOURCE_CACHE_ROOT/shim/${ver}-${commit}"
+    [[ -d "$source_cache/.git" && -f "$source_cache/debian/rules" ]] || return 1
+    source_cache_commit="$(source_commit "$source_cache")"
+    source_cache_remote="$(source_remote "$source_cache")"
+    source_cache_version="$(cd -- "$source_cache" && source_version)"
+    source_cache_tree="$(source_tree_sha256 "$source_cache")"
+    [[ "$source_cache_commit" == "$commit" ]] || return 1
+    [[ "$source_cache_remote" == "$SOURCE_REPO" ]] || return 1
+    [[ "$source_cache_version" == "$ver" ]] || return 1
+    [[ "$source_cache_tree" == "$source_tree_value" ]] || return 1
     [[ "$(state_get vendor_fingerprint)" == "$fp" ]] || return 1
     actual="$(sha256sum "$CUSTOM_ARTIFACT" | awk '{print $1}')"
     [[ "$(state_get signed_sha256)" == "$actual" ]] || return 1
@@ -213,7 +239,7 @@ wait_for_apt_idle() {
 }
 
 fetch_and_build() {
-    local expected="$1" source_dir
+    local expected="$1" source_dir upstream ref
     wait_for_apt_idle || return 1
     # Automatic reconciliation is intentionally exact-source only.  Never
     # accept an operator-provided checkout here: the resolver maps the
@@ -221,7 +247,11 @@ fetch_and_build() {
     # that immutable object.  Manual source experiments remain available via
     # run.sh --release's explicit-audit mode.
     source_dir="$(resolve_source "$expected")"
-    EXPECTED_SHIM_SOURCE_VERSION="$expected" SB_SHIM_BUILD_LOCK_HELD=1 \
+    upstream="${expected%%-*}"
+    upstream="${upstream##*:}"
+    ref="proxmox/trixie-${upstream}"
+    EXPECTED_SHIM_SOURCE_VERSION="$expected" EXPECTED_SHIM_SOURCE_REF="$ref" \
+        EXPECTED_SHIM_SOURCE_REMOTE="$SOURCE_REPO" SB_SHIM_BUILD_LOCK_HELD=1 \
         "$CUSTOM_BUILDER" "$source_dir"
     prune_source_cache
 }
@@ -241,7 +271,7 @@ while (( $# > 0 )); do
 done
 
 for c in cmp curl dd dpkg-parsechangelog dpkg-query flock git grep mktemp objcopy \
-    openssl rm sbverify sha256sum seq sleep stat strings sed install; do need "$c"; done
+    openssl rm sbverify sha256sum seq sleep sort stat strings sed install xargs; do need "$c"; done
 [[ "$(id -u)" -eq 0 ]] || die "Run as root"
 validate_paths
 [[ -x "$CUSTOM_BUILDER" ]] || die "Missing custom builder: $CUSTOM_BUILDER"

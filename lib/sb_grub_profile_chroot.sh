@@ -31,7 +31,6 @@ JOBS="${JOBS:-$(nproc 2>/dev/null || echo 1)}"
 MIN_FREE_KB="${MIN_FREE_KB:-3145728}"
 KEEP_PREVIOUS="${KEEP_PREVIOUS:-1}"
 SOURCE_CACHE_ROOT="${SOURCE_CACHE_ROOT:-$STATE_ROOT/source-cache}"
-GRUB_HISTORY_URL="${GRUB_HISTORY_URL:-https://git.proxmox.com/?p=grub2.git;a=history;f=debian/changelog;hb=proxmox/trixie}"
 
 # Proxmox does not publish a deb-src index for pve-no-subscription.  The
 # package's exact source therefore comes from the official Proxmox GRUB Git
@@ -40,6 +39,7 @@ GRUB_HISTORY_URL="${GRUB_HISTORY_URL:-https://git.proxmox.com/?p=grub2.git;a=his
 # arbitrary repository through the environment.
 readonly GRUB_SOURCE_REPO="https://git.proxmox.com/git/grub2"
 readonly GRUB_SOURCE_REF="proxmox/trixie"
+readonly GRUB_HISTORY_URL="https://git.proxmox.com/?p=grub2.git;a=history;f=debian/changelog;hb=proxmox/trixie"
 
 # This is intentionally the same set used by sb-guard's production image.
 # Keep only the UEFI GOP video path.  The source itself is still the complete
@@ -66,6 +66,26 @@ log() { printf '[sb-grub-profile-chroot] %s\n' "$*" >&2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 
+# Strip the shell indentation from generated configuration files while
+# keeping their source readable. The helper removes at most the requested
+# number of leading spaces and never changes configuration content otherwise.
+indent() {
+    local arg="${1:-}" mode num
+    if [[ "$arg" =~ ^([+-])([0-9]+)$ ]]; then
+        mode="${BASH_REMATCH[1]}"
+        num="${BASH_REMATCH[2]}"
+    else
+        mode="$arg"
+        num="${2:-0}"
+    fi
+    case "$mode" in
+        +) sed "s/^/$(printf '%*s' "$num" '')/" ;;
+        -) sed -E "s/^ {0,$num}//" ;;
+        0) awk '{ $1=$1; print }' ;;
+        *) return 1 ;;
+    esac
+}
+
 profile_modules_sha256() {
     # Hash relative paths so the value remains stable when a verified profile
     # is atomically moved from its temporary staging directory.
@@ -80,6 +100,14 @@ profile_module_list_sha256() {
     printf '%s\n' "${GRUB_MODULES[@]}" | sha256sum | awk '{print $1}'
 }
 
+profile_manifest_is_valid() {
+    [[ -s "$PROFILE_ROOT/manifest.sha256" ]] || return 1
+    (
+        cd -- "$PROFILE_ROOT"
+        sha256sum -c --strict manifest.sha256 >/dev/null 2>&1
+    )
+}
+
 profile_value() {
     local key="$1"
     [[ -s "$PROFILE_ROOT/profile.env" ]] || return 0
@@ -88,8 +116,8 @@ profile_value() {
 
 profile_is_current() {
     local installed builder modules_source sbat_source sbat_hash sbat_template sbat_template_hash
-    local source_remote_value
-    local source_ref_value source_commit_value source_tree_value
+    local source_remote_value source_ref_value source_commit_value source_tree_value
+    local source_cache source_cache_commit source_cache_remote source_cache_version source_cache_tree
     installed="$(installed_grub_version)"
     builder="$PROFILE_ROOT/bin/grub-mkstandalone"
     modules_source="$PROFILE_ROOT/lib/grub/x86_64-efi"
@@ -102,6 +130,7 @@ profile_is_current() {
     [[ "$(profile_value builder_sha256)" == "$(sha256_file "$builder")" ]] || return 1
     [[ "$(profile_value modules_tree_sha256)" == "$(profile_modules_sha256 "$modules_source")" ]] || return 1
     [[ "$(profile_value module_list_sha256)" == "$(profile_module_list_sha256)" ]] || return 1
+    profile_manifest_is_valid || return 1
     sbat_source="$(profile_value sbat_source)"
     sbat_hash="$(profile_value sbat_sha256)"
     [[ -n "$sbat_source" && -s "$PROFILE_ROOT/$sbat_source" ]] || return 1
@@ -123,6 +152,16 @@ profile_is_current() {
         && "$source_ref_value" == "$GRUB_SOURCE_REF" \
         && "$source_commit_value" =~ ^[[:xdigit:]]{40}$ \
         && "$source_tree_value" =~ ^[[:xdigit:]]{64}$ ]]; then
+        source_cache="$SOURCE_CACHE_ROOT/grub/${installed}-${source_commit_value}"
+        [[ -d "$source_cache/.git" && -f "$source_cache/configure.ac" ]] || return 1
+        source_cache_commit="$(source_commit "$source_cache")"
+        source_cache_remote="$(source_remote "$source_cache")"
+        source_cache_version="$(cd -- "$source_cache" && source_version)"
+        source_cache_tree="$(source_tree_sha256 "$source_cache")"
+        [[ "$source_cache_commit" == "$source_commit_value" ]] || return 1
+        [[ "$source_cache_remote" == "$GRUB_SOURCE_REPO" ]] || return 1
+        [[ "$source_cache_version" == "$installed" ]] || return 1
+        [[ "$source_cache_tree" == "$source_tree_value" ]] || return 1
         return 0
     fi
 
@@ -291,28 +330,29 @@ check_source() {
 
 write_chroot_sources() {
     local root="$1"
-    install -D -m 0644 /dev/stdin "$root/etc/apt/sources.list.d/sb-grub-build.sources" <<EOF
-Types: deb deb-src
-URIs: $MIRROR
-Suites: $SUITE $SUITE-updates
-Components: main
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+    cat <<EOF | indent -4 | install -D -m 0644 /dev/stdin \
+        "$root/etc/apt/sources.list.d/sb-grub-build.sources"
+    Types: deb deb-src
+    URIs: $MIRROR
+    Suites: $SUITE $SUITE-updates
+    Components: main
+    Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
-Types: deb deb-src
-URIs: $SECURITY_MIRROR
-Suites: $SUITE-security
-Components: main
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+    Types: deb deb-src
+    URIs: $SECURITY_MIRROR
+    Suites: $SUITE-security
+    Components: main
+    Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 EOF
 }
 
 configure_chroot_dns() {
     local root="$1"
     rm -f -- "$root/etc/resolv.conf"
-    install -m 0644 /dev/stdin "$root/etc/resolv.conf" <<EOF
-nameserver 1.1.1.1
-nameserver 9.9.9.9
-options timeout:2 attempts:3
+    cat <<EOF | indent -4 | install -m 0644 /dev/stdin "$root/etc/resolv.conf"
+    nameserver 1.1.1.1
+    nameserver 9.9.9.9
+    options timeout:2 attempts:3
 EOF
 }
 
@@ -530,12 +570,18 @@ publish_profile() {
         printf 'built_at=%s\n' "$(date -Is)"
     } >"$tmp/profile.env"
     chmod 0600 "$tmp/profile.env"
-    {
-        sha256sum "$tmp/bin/grub-mkstandalone" "$tmp/monolithic/grubx64.efi"
-        printf 'modules_tree_sha256=%s\n' "$modules_sha"
-        printf 'profile_env_sha256=%s\n' "$(sha256_file "$tmp/profile.env")"
-    } >"$tmp/manifest.sha256"
+    # Keep paths relative to the profile root. This makes the manifest
+    # self-checking after the temporary profile is atomically renamed to its
+    # final location, and prevents an old absolute staging path from becoming
+    # unverifiable metadata.
+    (
+        cd -- "$tmp"
+        sha256sum bin/grub-mkstandalone monolithic/grubx64.efi \
+            profile.env debian/sbat.proxmox.csv.in
+    ) >"$tmp/manifest.sha256"
     chmod 0600 "$tmp/manifest.sha256"
+    (cd -- "$tmp" && sha256sum -c --strict manifest.sha256 >/dev/null) ||
+        die "GRUB profile manifest self-check failed"
 
     # Publish atomically. Keep at most one previous profile for recovery;
     # failed builds leave the current profile untouched.  Move the current

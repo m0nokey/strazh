@@ -34,6 +34,27 @@ SHIM_SOURCE_CHROOT_BUILDER="${SHIM_SOURCE_CHROOT_BUILDER:-/usr/local/sbin/sb-shi
 # ==============================================================================
 die() { echo "ERROR: $*" >&2; exit 1; }
 log() { echo "[$(date '+%F %T')] $*" >&2; }
+
+# Strip the shell indentation from generated configuration files while
+# keeping their source readable. The helper removes at most the requested
+# number of leading spaces and never changes configuration content otherwise.
+indent() {
+    local arg="${1:-}" mode num
+    if [[ "$arg" =~ ^([+-])([0-9]+)$ ]]; then
+        mode="${BASH_REMATCH[1]}"
+        num="${BASH_REMATCH[2]}"
+    else
+        mode="$arg"
+        num="${2:-0}"
+    fi
+    case "$mode" in
+        +) sed "s/^/$(printf '%*s' "$num" '')/" ;;
+        -) sed -E "s/^ {0,$num}//" ;;
+        0) awk '{ $1=$1; print }' ;;
+        *) return 1 ;;
+    esac
+}
+
 usage() {
     cat <<'EOF'
 Usage:
@@ -82,14 +103,13 @@ run_release() {
     local policy_tmp=/etc/sb-guard/grub-build.env.new
     trap 'rm -f -- "$policy_tmp"' EXIT INT TERM
     install -d -m 0700 -o root -g root /etc/sb-guard
-    cat > "$policy_tmp" <<'EOF'
-# sb-guard GRUB build policy
-# Cached Trixie profile matched to the installed Proxmox source commit.
-GRUB_BUILD_MODE=profile
-GRUB_BUILD_PROFILE=/var/lib/sb-guard/grub-build/profile
-GRUB_PROFILE_ENV=/var/lib/sb-guard/grub-build/profile/profile.env
+    cat <<'EOF' | indent -4 | install -m 0600 -o root -g root /dev/stdin "$policy_tmp"
+    # sb-guard GRUB build policy
+    # Cached Trixie profile matched to the installed Proxmox source commit.
+    GRUB_BUILD_MODE=profile
+    GRUB_BUILD_PROFILE=/var/lib/sb-guard/grub-build/profile
+    GRUB_PROFILE_ENV=/var/lib/sb-guard/grub-build/profile/profile.env
 EOF
-    chmod 0600 "$policy_tmp"
     mv -f "$policy_tmp" /etc/sb-guard/grub-build.env
     trap - EXIT INT TERM
 
@@ -101,6 +121,9 @@ EOF
 # Preconditions and source validation
 # ==============================================================================
 [[ "$(id -u)" -eq 0 ]] || die "Run as root"
+for cmd in sed install mv rm flock; do
+    command -v "$cmd" >/dev/null 2>&1 || die "Missing command: $cmd"
+done
 if (( RELEASE_MODE == 0 )); then
     if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
         usage
@@ -125,7 +148,7 @@ if (( RELEASE_MODE == 1 )); then
     exit 0
 fi
 
-for cmd in openssl sbsign sbverify sbattach dpkg-parsechangelog sha256sum install cp mv rm find strings objcopy stat dd cmp flock git; do
+for cmd in awk openssl sbsign sbverify sbattach dpkg-parsechangelog sha256sum cp find strings objcopy stat dd cmp git; do
     command -v "$cmd" >/dev/null 2>&1 || die "Missing command: $cmd"
 done
 [[ -x "$SHIM_SOURCE_CHROOT_BUILDER" ]] || die "Missing isolated shim source builder: $SHIM_SOURCE_CHROOT_BUILDER"
@@ -173,6 +196,15 @@ source_remote="$(git -C "$source" config --get remote.origin.url 2>/dev/null || 
 source_tree_sha256="$({ find "$source" -type f -not -path '*/.git/*' -not -path '*/debian/tmp/*' -not -path '*/debian/.debhelper/*' -print0 \
     | sort -z \
     | xargs -0r sha256sum; } | sha256sum | awk '{print $1}')"
+expected_source_ref="${EXPECTED_SHIM_SOURCE_REF:-}"
+expected_source_remote="${EXPECTED_SHIM_SOURCE_REMOTE:-https://git.proxmox.com/git/efi-boot-shim.git}"
+if [[ -n "$expected_source_ref" ]]; then
+    [[ "$expected_source_ref" =~ ^proxmox/trixie-[0-9A-Za-z.+:~_-]+$ ]] || die \
+        "Invalid expected Proxmox shim source ref: $expected_source_ref"
+fi
+[[ "$source_remote" == "$expected_source_remote" || \
+    "$source_remote" == "$expected_source_remote.git" ]] || die \
+    "Source remote does not match the resolved Proxmox remote"
 
 unsigned_efi="$build_dir/shimx64.unsigned.efi"
 "$SHIM_SOURCE_CHROOT_BUILDER" "$source" "$vendor_der" "$unsigned_efi"
@@ -223,6 +255,8 @@ mv -f "$CUSTOM_DIR/shimx64.efi.new" "$CUSTOM_DIR/shimx64.efi"
     printf 'source_package_sha256=%s\n' "$installed_sha256"
     printf 'source_tree_sha256=%s\n' "$source_tree_sha256"
     printf 'source_git_commit=%s\n' "$source_git_commit"
+    printf 'source_remote=%s\n' "$source_remote"
+    printf 'source_ref=%s\n' "$expected_source_ref"
     printf 'vendor_fingerprint=%s\n' "$vendor_fingerprint"
     printf 'vendor_subject=%s\n' "$our_subject"
     printf 'signed_sha256=%s\n' "$signed_sha256"

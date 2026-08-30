@@ -14,11 +14,19 @@ PVE_KEYRING="/etc/apt/keyrings/proxmox-release-trixie.gpg"
 PVE_SOURCES="/etc/apt/sources.list.d/pve-no-subscription.sources"
 PVE_ENTERPRISE="/etc/apt/sources.list.d/pve-enterprise.sources"
 PVE_REPO_URI="${PVE_REPO_URI:-http://download.proxmox.com/debian/pve}"
+# These values are copied from the official Proxmox Trixie repository
+# documentation. A keyring change must be reviewed in the source before it
+# can be accepted; an unexpected download fails closed before APT uses it.
+readonly PVE_KEY_URL="https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg"
+readonly PVE_KEY_SHA256="136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45"
+readonly PVE_KEY_FINGERPRINT="24B30F06ECC1836A4E5EFECBA7BCD1420BFE778E"
 DEBIAN_SOURCES="/etc/apt/sources.list.d/debian.sources"
 SB_GUARD_EVENT="/usr/local/sbin/sb-guard-event"
 SB_GUARD_TRANSACTION=0
 SB_GUARD_LOCK_FILE="/run/sb-guard.lock"
 SB_GUARD_LOCK_HELD=0
+ESP_MOUNT="/boot/efi"
+PVE_ESP_REMOUNTED_RW=0
 
 # ==============================================================================
 # Helpers
@@ -33,6 +41,9 @@ die() {
 }
 
 indent() {
+    # Remove only the indentation added around generated configuration files.
+    # This implementation stays embedded because the helper is installed and
+    # used independently of the source clone.
     local arg="${1:-}" mode num
     if [[ "$arg" =~ ^([+-])([0-9]+)$ ]]; then
         mode="${BASH_REMATCH[1]}"
@@ -100,6 +111,7 @@ sb_guard_transaction_end() {
 
 cleanup() {
     local rc=$?
+    restore_pve_esp_ro || rc=1
     sb_guard_transaction_end
     return "$rc"
 }
@@ -114,6 +126,71 @@ apt_run() {
         -o APT::Update::Post-Invoke::= \
         -o APT::Update::Post-Invoke-Success::= \
         "$@"
+}
+
+ensure_pve_esp_rw() {
+    local fstype options
+    command -v findmnt >/dev/null 2>&1 || die "Missing command: findmnt"
+    command -v mount >/dev/null 2>&1 || die "Missing command: mount"
+    fstype="$(findmnt -nro FSTYPE "$ESP_MOUNT" 2>/dev/null || true)"
+    [[ "$fstype" == vfat ]] || die "ESP must be mounted as vfat at $ESP_MOUNT"
+    options="$(findmnt -nro OPTIONS "$ESP_MOUNT" 2>/dev/null || true)"
+    case ",$options," in
+        *,ro,*)
+            mount -o remount,rw "$ESP_MOUNT" ||
+                die "Cannot temporarily remount the ESP read-write for package scripts"
+            PVE_ESP_REMOUNTED_RW=1
+            log "ESP temporarily remounted read-write for the Proxmox package transaction"
+            ;;
+        *)
+            log "ESP is already read-write for the Proxmox package transaction"
+            ;;
+    esac
+}
+
+restore_pve_esp_ro() {
+    if (( PVE_ESP_REMOUNTED_RW == 1 )); then
+        mount -o remount,ro,nodev,nosuid,noexec,noatime,fmask=0177,dmask=0077 \
+            "$ESP_MOUNT" >/dev/null 2>&1 || {
+            log "ERROR: could not restore the ESP read-only mount"
+            return 1
+        }
+        PVE_ESP_REMOUNTED_RW=0
+        log "ESP restored to read-only after the Proxmox package transaction"
+    fi
+}
+
+check_pve_install_resources() {
+    local mem_kb swap_kb
+    read -r mem_kb swap_kb < <(
+        awk '/^MemTotal:/ { mem = $2 } /^SwapTotal:/ { swap = $2 }
+            END { print mem + 0, swap + 0 }' /proc/meminfo
+    )
+    # A small VM can pass the kernel stage and still be killed while
+    # proxmox-ve configures its dependency graph. Accept either a 4 GiB
+    # machine, or a smaller machine with at least 2 GiB RAM plus 2 GiB swap.
+    if (( mem_kb < 4194304 && (mem_kb < 2097152 || swap_kb < 2097152) )); then
+        die "Proxmox package stage needs at least 4 GiB RAM, or 2 GiB RAM + 2 GiB swap (detected RAM=$((mem_kb / 1024)) MiB swap=$((swap_kb / 1024)) MiB)"
+    fi
+}
+
+install_proxmox_packages() {
+    local rc
+
+    # proxmox-ve configures a large dependency graph and regenerates initramfs
+    # images. If the kernel OOM killer terminates APT, report the cause instead
+    # of exposing only an opaque exit status to the operator.
+    set +e
+    apt_run install -y proxmox-ve postfix open-iscsi chrony ifupdown2
+    rc=$?
+    set -e
+    if (( rc == 137 )); then
+        log "ERROR: Proxmox package installation was killed by the kernel (exit 137)."
+        log "Increase VM/server memory to at least 4 GiB and provide at least 2 GiB swap."
+        log "After recovery, run 'dpkg --configure -a' and rerun 'bash ./run.sh'."
+        return 137
+    fi
+    return "$rc"
 }
 
 split_words() {
@@ -390,14 +467,45 @@ install_prereqs() {
 # ==============================================================================
 # Proxmox APT repository
 # ==============================================================================
+install_pve_keyring() (
+    local tmp downloaded dearmored target_tmp actual_sha fingerprints
+
+    tmp="$(mktemp -d -p /var/tmp strazh-proxmox-keyring.XXXXXX)" ||
+        die "Unable to create temporary Proxmox keyring directory"
+    downloaded="$tmp/proxmox-archive-keyring.gpg"
+    dearmored="$tmp/proxmox-archive-keyring.dearmored.gpg"
+    target_tmp="$(mktemp "${PVE_KEYRING}.new.XXXXXX")" ||
+        die "Unable to create temporary Proxmox keyring destination"
+    trap 'rm -rf -- "$tmp"; rm -f -- "$target_tmp"' EXIT
+
+    curl -4 -fsSL --proto '=https' --tlsv1.3 --retry 5 \
+        --connect-timeout 15 --max-time 90 "$PVE_KEY_URL" -o "$downloaded" \
+        || die "Unable to download the pinned Proxmox archive keyring"
+    actual_sha="$(sha256sum "$downloaded" | awk '{print $1}')"
+    [[ "$actual_sha" == "$PVE_KEY_SHA256" ]] ||
+        die "Proxmox keyring SHA256 mismatch (expected=$PVE_KEY_SHA256 actual=$actual_sha)"
+
+    # Inspect the downloaded bytes in an isolated GnuPG home. show-only does
+    # not import the key and therefore cannot alter the host trust database.
+    install -d -m 0700 "$tmp/gnupg"
+    fingerprints="$(gpg --batch --no-options --homedir "$tmp/gnupg" \
+        --with-colons --import-options show-only --import "$downloaded" \
+        2>/dev/null | awk -F: '$1 == "fpr" { print toupper($10) }' || true)"
+    grep -Fqx "$PVE_KEY_FINGERPRINT" <<<"$fingerprints" ||
+        die "Pinned Proxmox keyring fingerprint is missing: $PVE_KEY_FINGERPRINT"
+
+    gpg --batch --no-options --yes --dearmor \
+        --output "$dearmored" "$downloaded" ||
+        die "Unable to dearmor the verified Proxmox keyring"
+    install -o root -g root -m 0644 "$dearmored" "$target_tmp"
+    mv -f -- "$target_tmp" "$PVE_KEYRING"
+    log "Verified Proxmox keyring (sha256=$actual_sha fingerprint=$PVE_KEY_FINGERPRINT)"
+)
+
 setup_pve_repo() {
     log "Configuring Proxmox APT repository (deb822)..."
     install -d -m 0755 /etc/apt/keyrings
-
-    curl -fsSL --proto '=https' --tlsv1.3 \
-        "https://enterprise.proxmox.com/debian/proxmox-release-trixie.gpg" \
-        | gpg --batch --yes --dearmor \
-        | install -o root -g root -m 0644 /dev/stdin "$PVE_KEYRING"
+    install_pve_keyring
 
     # The official no-subscription endpoint currently serves a certificate for
     # enterprise.proxmox.com on its download hostname.  Keep transport HTTP
@@ -520,8 +628,9 @@ purge_debian_kernels() {
 
 install_pve_stage2() {
     log "Installing Proxmox VE packages..."
+    check_pve_install_resources
     apt_run update
-    apt_run install -y proxmox-ve postfix open-iscsi chrony ifupdown2
+    install_proxmox_packages
     apt_run purge -y os-prober || true
 
     log "Removing Debian kernels..."
@@ -549,6 +658,7 @@ main() {
     require_debian_trixie
     trap cleanup EXIT
     sb_guard_transaction_begin
+    ensure_pve_esp_rw
 
     log "Starting Proxmox VE install on Debian 13 (trixie)..."
     ensure_hosts

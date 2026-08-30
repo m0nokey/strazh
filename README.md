@@ -42,7 +42,9 @@ with custom-only EFI files before enrolling `db.crt`.
 - root access and a mounted FAT32 ESP at `/boot/efi`;
 - a Debian installation with encrypted LVM and a root LUKS2 container;
 - network access for the initial package and source downloads;
-- at least 4 GB free space for the cached build root and compilation.
+- at least 4 GB free space for the cached build root and compilation;
+- at least 4 GiB RAM, or 2 GiB RAM plus 2 GiB swap, for the Proxmox package
+  transaction.
 
 The installer targets x86_64 UEFI systems with GOP. Legacy BIOS/CSM, non-x86
 architectures and firmware without GOP require a separate platform profile.
@@ -368,6 +370,30 @@ stack, and builds the x86_64 EFI image in the shared cached Trixie root. Shim is
 built from the matching Proxmox source using the installed `shim-unsigned`
 version and hash as the input signal. Signing happens outside the chroot; the
 private `db.key` is never copied into it.
+
+The Proxmox APT bootstrap keyring is downloaded only from the official HTTPS
+endpoint. Before it is installed, Strazh requires both the pinned SHA-256
+(`136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45`) and the
+published Trixie release-key fingerprint
+(`24B30F06ECC1836A4E5EFECBA7BCD1420BFE778E`). A mismatch stops the installation
+before APT can use the key. Updating the key requires an explicit source change
+and review.
+
+There is no Proxmox-published signed manifest that maps package versions to Git
+commits. Strazh therefore uses the strongest available binding: the installed
+package version is matched to the official GitWeb changelog entry, the exact
+40-character commit is fetched from the pinned Proxmox HTTPS repository, and
+the source tree, Debian patch series, builder, SBAT template and module closure
+are hashed into the profile. `profile.env` and its relative-path
+`manifest.sha256` are revalidated, and the cached source tree is rehashed before
+an existing profile is reused. Shim state applies the same commit, remote/ref
+and source-tree checks. These hashes attest to the exact bytes Strazh built;
+they are not presented as an upstream Proxmox signature.
+
+During the Proxmox package stage only, the installer temporarily remounts the
+ESP read-write so Debian/Proxmox package post-install hooks can update their
+transitional loader. The EXIT cleanup always restores the hardened read-only
+mount, including after an interrupted or failed package command.
 
 The shared build root is reusable:
 

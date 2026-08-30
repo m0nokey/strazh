@@ -68,9 +68,10 @@ require_root() {
 }
 
 indent() {
-    local arg="${1:-}"
-    local mode
-    local num
+    # Remove only the indentation added around generated files in this source.
+    # The installed scripts remain self-contained, so this helper is embedded
+    # here rather than sourced from the clone after installation.
+    local arg="${1:-}" mode num
     if [[ "$arg" =~ ^([+-])([0-9]+)$ ]]; then
         mode="${BASH_REMATCH[1]}"
         num="${BASH_REMATCH[2]}"
@@ -79,10 +80,10 @@ indent() {
         num="${2:-0}"
     fi
     case "$mode" in
-        +) sed "s/^/$(printf '%*s' "$num" '')/";;
-        -) sed -E "s/^ {0,$num}//";;
-        0) awk '{ $1=$1; print }';;
-        *) return 1;;
+        +) sed "s/^/$(printf '%*s' "$num" '')/" ;;
+        -) sed -E "s/^ {0,$num}//" ;;
+        0) awk '{ $1=$1; print }' ;;
+        *) return 1 ;;
     esac
 }
 
@@ -4740,13 +4741,15 @@ install_grub_build_policy() {
     # existing policy untouched.
     install -d -m 0700 -o root -g root "$(dirname "$GRUB_BUILD_POLICY")"
     if [[ ! -s "$GRUB_BUILD_POLICY" ]]; then
-        cat <<'EOF' | install -m 0600 -o root -g root /dev/stdin "$GRUB_BUILD_POLICY"
-# sb-guard GRUB build policy
-# packaged = migration/recovery mode before profile activation
-# profile  = production isolated source-matched profile
-GRUB_BUILD_MODE=packaged
-GRUB_BUILD_PROFILE=/var/lib/sb-guard/grub-build/profile
-GRUB_PROFILE_ENV=/var/lib/sb-guard/grub-build/profile/profile.env
+        # The heredoc is nested inside the function and this if block; remove
+        # both source indentation levels before writing the policy file.
+        cat <<'EOF' | indent -8 | install -m 0600 -o root -g root /dev/stdin "$GRUB_BUILD_POLICY"
+        # sb-guard GRUB build policy
+        # packaged = migration/recovery mode before profile activation
+        # profile  = production isolated source-matched profile
+        GRUB_BUILD_MODE=packaged
+        GRUB_BUILD_PROFILE=/var/lib/sb-guard/grub-build/profile
+        GRUB_PROFILE_ENV=/var/lib/sb-guard/grub-build/profile/profile.env
 EOF
         ok "installed default GRUB build policy -> $GRUB_BUILD_POLICY"
     else
@@ -4843,6 +4846,8 @@ EOF
 # ==============================================================================
 main() {
     require_root
+    have_cmd awk || die "Missing command: awk"
+    have_cmd sed || die "Missing command: sed"
 
     # Installing or replacing the lifecycle scripts is itself a system-wide
     # transaction.  Stage 03 already owns this lock; direct recovery calls

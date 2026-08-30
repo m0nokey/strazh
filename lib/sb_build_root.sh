@@ -45,6 +45,26 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 log() { printf '[sb-build-root] %s\n' "$*" >&2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 
+# Strip the shell indentation from generated configuration files while
+# keeping their source readable. The helper removes at most the requested
+# number of leading spaces and never changes configuration content otherwise.
+indent() {
+    local arg="${1:-}" mode num
+    if [[ "$arg" =~ ^([+-])([0-9]+)$ ]]; then
+        mode="${BASH_REMATCH[1]}"
+        num="${BASH_REMATCH[2]}"
+    else
+        mode="$arg"
+        num="${2:-0}"
+    fi
+    case "$mode" in
+        +) sed "s/^/$(printf '%*s' "$num" '')/" ;;
+        -) sed -E "s/^ {0,$num}//" ;;
+        0) awk '{ $1=$1; print }' ;;
+        *) return 1 ;;
+    esac
+}
+
 packages_hash() {
     printf '%s\n' "${BASE_PACKAGES[*]}" | sha256sum | awk '{print $1}'
 }
@@ -98,29 +118,29 @@ clean_workspace_unlocked() {
 
 write_sources() {
     local root="$1"
-    install -D -m 0644 /dev/stdin \
-        "$root/etc/apt/sources.list.d/sb-guard-build.sources" <<EOF
-Types: deb deb-src
-URIs: $MIRROR
-Suites: $SUITE $SUITE-updates
-Components: main
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+    cat <<EOF | indent -4 | install -D -m 0644 /dev/stdin \
+        "$root/etc/apt/sources.list.d/sb-guard-build.sources"
+    Types: deb deb-src
+    URIs: $MIRROR
+    Suites: $SUITE $SUITE-updates
+    Components: main
+    Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
-Types: deb deb-src
-URIs: $SECURITY_MIRROR
-Suites: $SUITE-security
-Components: main
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+    Types: deb deb-src
+    URIs: $SECURITY_MIRROR
+    Suites: $SUITE-security
+    Components: main
+    Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 EOF
 }
 
 configure_dns() {
     local root="$1"
     rm -f -- "$root/etc/resolv.conf"
-    install -m 0644 /dev/stdin "$root/etc/resolv.conf" <<'EOF'
-nameserver 1.1.1.1
-nameserver 9.9.9.9
-options timeout:2 attempts:3
+    cat <<'EOF' | indent -4 | install -m 0644 /dev/stdin "$root/etc/resolv.conf"
+    nameserver 1.1.1.1
+    nameserver 9.9.9.9
+    options timeout:2 attempts:3
 EOF
 }
 

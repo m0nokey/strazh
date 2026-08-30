@@ -192,6 +192,26 @@ need_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
 }
 
+# Strip only the indentation used to keep generated configuration heredocs
+# readable in this source file. Complete embedded scripts are intentionally
+# not passed through this helper because their internal indentation matters.
+indent() {
+    local arg="${1:-}" mode num
+    if [[ "$arg" =~ ^([+-])([0-9]+)$ ]]; then
+        mode="${BASH_REMATCH[1]}"
+        num="${BASH_REMATCH[2]}"
+    else
+        mode="$arg"
+        num="${2:-0}"
+    fi
+    case "$mode" in
+        +) sed "s/^/$(printf '%*s' "$num" '')/" ;;
+        -) sed -E "s/^ {0,$num}//" ;;
+        0) awk '{ $1=$1; print }' ;;
+        *) return 1 ;;
+    esac
+}
+
 install_host_cli() {
     install -D -m 0750 -o root -g root /dev/stdin "$STRAZH_HOST_CLI_DST" <<'STRAZH_HOST_CLI' || die "Cannot install embedded host utility: $STRAZH_HOST_CLI_DST"
 #!/usr/bin/env bash
@@ -983,6 +1003,7 @@ transitional_efi_loader_path() {
 }
 
 repair_transitional_efi_loader() (
+    # shellcheck disable=SC2034 # esp_rw is read by the EXIT trap below.
     local esp_rw=0 rc=0
 
     [[ "$NONINTERACTIVE" -eq 0 && -t 0 && -t 1 ]] ||
@@ -1013,6 +1034,7 @@ repair_transitional_efi_loader() (
     fi; exit "$rc"' EXIT
     mount -o remount,rw /boot/efi ||
         die "Could not open the ESP for the controlled loader repair."
+    # shellcheck disable=SC2034 # consumed by the EXIT trap above.
     esp_rw=1
 
     log "Restoring transitional Debian EFI loader from installed packages…"
@@ -1205,12 +1227,12 @@ quarantine_pve_enterprise_sources() {
 
 secure_boot_activate_profile_policy() {
     install -d -m 0700 -o root -g root /etc/sb-guard || return 1
-    if ! cat <<'EOF' | install -m 0600 -o root -g root /dev/stdin /etc/sb-guard/grub-build.env
-# sb-guard GRUB build policy
-# Pinned reproducible Trixie profile with the standard interactive CLI.
-GRUB_BUILD_MODE=profile
-GRUB_BUILD_PROFILE=/var/lib/sb-guard/grub-build/profile
-GRUB_PROFILE_ENV=/var/lib/sb-guard/grub-build/profile/profile.env
+    if ! cat <<'EOF' | indent -4 | install -m 0600 -o root -g root /dev/stdin /etc/sb-guard/grub-build.env
+    # sb-guard GRUB build policy
+    # Pinned reproducible Trixie profile with the standard interactive CLI.
+    GRUB_BUILD_MODE=profile
+    GRUB_BUILD_PROFILE=/var/lib/sb-guard/grub-build/profile
+    GRUB_PROFILE_ENV=/var/lib/sb-guard/grub-build/profile/profile.env
 EOF
     then
         return 1
@@ -1880,6 +1902,7 @@ main() {
     need_cmd dpkg-query
     need_cmd stat
     need_cmd flock
+    need_cmd sed
 
     # Status is read-only and must remain useful while a worker holds the
     # pipeline lock.  The state file is updated by atomic rename, so a direct
