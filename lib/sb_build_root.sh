@@ -24,6 +24,7 @@ MIRROR="${MIRROR:-https://deb.debian.org/debian}"
 SECURITY_MIRROR="${SECURITY_MIRROR:-https://security.debian.org/debian-security}"
 SUITE="${SUITE:-trixie}"
 MIN_FREE_KB="${MIN_FREE_KB:-4194304}"
+BASE_ROOT_CREATED=0
 
 # Union of the tested GRUB and Proxmox efi-boot-shim build dependencies. The
 # list is explicit; apt build-dep is used only as a one-time supplement for a
@@ -116,6 +117,19 @@ clean_workspace_unlocked() {
         "$BASE_ROOT/build/tmp" "$BASE_ROOT/build/home"
 }
 
+close_inherited_fds_for_mmdebstrap() {
+    # mmdebstrap reports package download status through an APT hook of the
+    # form `cat >&N`. Debian's dash only accepts single-digit descriptors. The
+    # build orchestrators intentionally hold several lock descriptors, which
+    # can make mmdebstrap allocate N=10 or higher and fail before provisioning
+    # starts. Close inherited descriptors only in this child; the parent keeps
+    # every lock open for the duration of the transaction.
+    local fd
+    for ((fd = 3; fd <= 255; fd++)); do
+        exec {fd}>&- 2>/dev/null || true
+    done
+}
+
 write_sources() {
     local root="$1"
     cat <<EOF | indent -4 | install -D -m 0644 /dev/stdin \
@@ -152,7 +166,8 @@ base_is_ready() {
 }
 
 ensure_base() {
-    local root_created=0 rc=0
+    local rc=0
+    BASE_ROOT_CREATED=0
     if base_is_ready; then
         log "Using cached Trixie build root: $BASE_ROOT"
         clean_workspace_unlocked
@@ -171,12 +186,12 @@ ensure_base() {
         rm -rf --one-file-system -- "$BASE_ROOT"
     fi
     install -d -m 0700 -o root -g root "$BASE_ROOT"
-    root_created=1
+    BASE_ROOT_CREATED=1
     cleanup() {
         rc=$?
         set +e
         unmount_tree "$BASE_ROOT"
-        if (( rc != 0 && root_created == 1 )); then
+        if (( rc != 0 && BASE_ROOT_CREATED == 1 )); then
             rm -rf --one-file-system -- "$BASE_ROOT" 2>/dev/null || true
         fi
         exit "$rc"
@@ -186,17 +201,20 @@ ensure_base() {
     log "Provisioning one cached Debian $SUITE build root"
     local include
     include="$(IFS=,; printf '%s' "${BASE_PACKAGES[*]}")"
-    mmdebstrap --variant=essential --architectures=amd64 --components=main \
-        --include="$include" \
-        --aptopt='Acquire::Retries "5"' \
-        --aptopt='Acquire::ForceIPv4 "true"' \
-        --aptopt='Acquire::https::Timeout "30"' \
-        --aptopt='APT::Install-Recommends "false"' \
-        --aptopt='APT::Install-Suggests "false"' \
-        --setup-hook="mkdir -p \"\$1/var/cache/apt/archives\"; mount --bind \"$APT_CACHE\" \"\$1/var/cache/apt/archives\"" \
-        --customize-hook='umount "$1/var/cache/apt/archives"' \
-        "$SUITE" "$BASE_ROOT" \
-        "deb $MIRROR $SUITE main" "deb $SECURITY_MIRROR $SUITE-security main"
+    (
+        close_inherited_fds_for_mmdebstrap
+        mmdebstrap --variant=essential --architectures=amd64 --components=main \
+            --include="$include" \
+            --aptopt='Acquire::Retries "5"' \
+            --aptopt='Acquire::ForceIPv4 "true"' \
+            --aptopt='Acquire::https::Timeout "30"' \
+            --aptopt='APT::Install-Recommends "false"' \
+            --aptopt='APT::Install-Suggests "false"' \
+            --setup-hook="mkdir -p \"\$1/var/cache/apt/archives\"; mount --bind \"$APT_CACHE\" \"\$1/var/cache/apt/archives\"" \
+            --customize-hook='umount "$1/var/cache/apt/archives"' \
+            "$SUITE" "$BASE_ROOT" \
+            "deb $MIRROR $SUITE main" "deb $SECURITY_MIRROR $SUITE-security main"
+    )
     write_sources "$BASE_ROOT"
     configure_dns "$BASE_ROOT"
     clean_workspace_unlocked
@@ -210,6 +228,7 @@ ensure_base() {
     chmod 0600 "$MARKER"
     sync
     trap - EXIT INT TERM
+    BASE_ROOT_CREATED=0
     log "Cached build root ready: $BASE_ROOT"
 }
 
