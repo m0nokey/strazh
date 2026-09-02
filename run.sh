@@ -80,6 +80,10 @@ log() {
     printf '[strazh] %s\n' "$*" >&2
 }
 
+ok() {
+    log "OK: $*"
+}
+
 ui_heading() {
     printf '%s%s%s\n' "$BLUE" "$1" "$RESET"
 }
