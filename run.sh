@@ -305,12 +305,36 @@ key_vault_present() {
         "/var/lib/sb-guard/keys/vault/$STRAZH_KEY_VAULT_GENERATION/format.conf" ]]
 }
 
-key_vault_open_for_signing() {
+key_vault_open_only() {
     key_vault_present || die "Private-key vault is not initialized"
     run_interactive_step 'Secure Boot: unlock private-key vault' \
         "$STRAZH_KEY_VAULT_DST" open "$STRAZH_KEY_VAULT_GENERATION" || return $?
+}
+
+key_vault_link_open() {
     "$STRAZH_KEY_VAULT_DST" link "$STRAZH_KEY_VAULT_GENERATION" >/dev/null 2>&1 ||
         die "Cannot link private signing material from the key vault"
+}
+
+key_vault_open_for_signing() {
+    key_vault_open_only || return $?
+    key_vault_link_open
+}
+
+key_vault_unvaulted_material_present() {
+    local key
+    for key in PK KEK db; do
+        if [[ -f "/var/lib/sb-guard/keys/$key.key" &&
+            ! -L "/var/lib/sb-guard/keys/$key.key" ]]; then
+            return 0
+        fi
+    done
+    if [[ -d /var/lib/sb-guard/gpg && ! -L /var/lib/sb-guard/gpg ]] &&
+        find /var/lib/sb-guard/gpg -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null |
+            grep -q .; then
+        return 0
+    fi
+    return 1
 }
 
 key_vault_close_after_signing() {
@@ -318,18 +342,6 @@ key_vault_close_after_signing() {
     "$STRAZH_KEY_VAULT_DST" close "$STRAZH_KEY_VAULT_GENERATION" >/dev/null 2>&1 ||
         log "ERROR: cannot close private-key vault"
 }
-
-key_vault_initialize_after_key_generation() {
-    key_vault_present && return 0
-    run_interactive_step 'Secure Boot: create private-key vault' \
-        "$STRAZH_KEY_VAULT_DST" create "$STRAZH_KEY_VAULT_GENERATION" || return $?
-    key_vault_open_for_signing || return $?
-    run_interactive_step 'Secure Boot: move private keys into vault' \
-        "$STRAZH_KEY_VAULT_DST" migrate "$STRAZH_KEY_VAULT_GENERATION" || return $?
-    "$STRAZH_KEY_VAULT_DST" link "$STRAZH_KEY_VAULT_GENERATION" >/dev/null 2>&1 ||
-        die "Cannot link migrated private signing material"
-}
-
 
 acquire_lock() {
     ((LOCK_HELD == 1)) && return 0
@@ -1081,10 +1093,12 @@ secure_boot_stage() (
         "$SCRIPT_DIR/lib/sb_shim_build_custom.sh" "$SECURE_BOOT_CUSTOM_BUILDER_DST" ||
         die "Cannot install custom shim builder"
 
-    # Existing private keys are linked into the vault.  A closed vault makes
-    # signing paths unavailable and the stage must ask for its passphrase
-    # before any private-key operation can begin.
-    if key_vault_present; then
+    # A complete vault from a previous run is opened before package helpers
+    # inspect the existing signing keys.  A newly-created but still-empty
+    # vault is deliberately left closed until after UEFI/GPG initialization so
+    # an interrupted migration can resume safely.
+    if [[ "$SECURE_BOOT_MODE" != install-only ]] &&
+        key_vault_present && ! key_vault_unvaulted_material_present; then
         key_vault_open_for_signing || die "Private-key vault unlock failed"
         key_vault_opened=1
     fi
@@ -1117,10 +1131,25 @@ secure_boot_stage() (
     run_quiet_step 'Secure Boot: initialize GPG trust root' \
         /usr/local/sbin/sb-install --init-gpg-keys ||
         die "GPG key initialization failed"
-    if ! key_vault_present; then
-        key_vault_initialize_after_key_generation ||
+    if key_vault_present; then
+        if ((key_vault_opened == 0)); then
+            key_vault_open_only || die "Private-key vault unlock failed"
+            key_vault_opened=1
+        fi
+        run_interactive_step 'Secure Boot: move private keys into vault' \
+            "$STRAZH_KEY_VAULT_DST" migrate "$STRAZH_KEY_VAULT_GENERATION" ||
+            die "Private-key vault migration failed"
+        key_vault_link_open
+    else
+        run_interactive_step 'Secure Boot: create private-key vault' \
+            "$STRAZH_KEY_VAULT_DST" create "$STRAZH_KEY_VAULT_GENERATION" ||
             die "Private-key vault initialization failed"
+        key_vault_open_only || die "Private-key vault unlock failed"
         key_vault_opened=1
+        run_interactive_step 'Secure Boot: move private keys into vault' \
+            "$STRAZH_KEY_VAULT_DST" migrate "$STRAZH_KEY_VAULT_GENERATION" ||
+            die "Private-key vault migration failed"
+        key_vault_link_open
     fi
     run_quiet_step 'Secure Boot: build or reuse custom shim' \
         /usr/local/sbin/sb-shim-auto-build ||
