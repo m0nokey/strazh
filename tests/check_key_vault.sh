@@ -10,6 +10,8 @@ bash -n "$vault"
 grep -Fq -- 'cryptsetup open --type plain --cipher' "$vault"
 grep -Fq -- 'nodev,nosuid,noexec,noatime' "$vault"
 grep -Fq -- 'cryptsetup close' "$vault"
+grep -Fq -- 'Key vault already exists; reusing' "$vault"
+grep -Fq -- 'Quarantined incomplete vault generation' "$vault"
 if grep -nE '(^|[[:space:]])sudo([[:space:]]|$)|log.*PASSPHRASE|/var/log.*PASSPHRASE' "$vault"; then
     printf '%s\n' 'Unsafe sudo or passphrase logging found in key vault helper' >&2
     exit 1

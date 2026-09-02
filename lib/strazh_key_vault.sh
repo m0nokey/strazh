@@ -156,15 +156,40 @@ open_mapping() {
 }
 
 create_vault() {
-    local generation="$1" directory vault tmp mapper device mountpoint
+    local generation="$1" directory vault metadata stale tmp mapper device mountpoint
     assert_generation "$generation"
     validate_size
     ensure_roots
     directory="$(vault_dir "$generation")"
     vault="$(vault_path "$generation")"
+    metadata="$(metadata_path "$generation")"
     mapper="$(mapper_name "$generation")"
     mountpoint="$(mount_path "$generation")"
-    [[ ! -e "$directory" ]] || die "Generation already exists: $directory"
+    if [[ -e "$directory" ]]; then
+        # A complete generation is safe to reuse. This is the normal path on
+        # an interrupted or repeated Secure Boot stage; creating it again
+        # would incorrectly fail with "Generation already exists".
+        if [[ -s "$vault" && -s "$metadata" ]]; then
+            verify_format_metadata "$generation"
+            log "Key vault already exists; reusing: $vault"
+            return 0
+        fi
+
+        [[ -d "$directory" && ! -L "$directory" ]] ||
+            die "Vault generation path is not a protected directory: $directory"
+
+        # Keep durable or ambiguous material for manual recovery. Only an
+        # empty/temporary directory left by an interrupted create operation
+        # may be quarantined automatically before a fresh creation.
+        if find "$directory" -mindepth 1 -maxdepth 1 \
+            ! -name '.private-keys.*' -print -quit 2>/dev/null | grep -q .; then
+            die "Vault generation exists but is incomplete; inspect before retrying: $directory"
+        fi
+        stale="${directory}.stale.$(date +%Y%m%d-%H%M%S).$$"
+        mv -- "$directory" "$stale" ||
+            die "Cannot quarantine incomplete vault generation: $directory"
+        log "Quarantined incomplete vault generation: $stale"
+    fi
     install -d -m 0700 -o root -g root "$directory"
     tmp="$(mktemp "$directory/.private-keys.XXXXXX")"
     trap 'rm -f -- "${tmp:-}"; mountpoint -q "${mountpoint:-}" && umount "${mountpoint:-}" || true; cryptsetup close "${mapper:-}" >/dev/null 2>&1 || true' EXIT
