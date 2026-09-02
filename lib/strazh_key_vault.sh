@@ -29,6 +29,10 @@ die() {
 }
 need() { command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"; }
 require_root() { [[ "$(id -u)" -eq 0 ]] || die 'Run this command as root.'; }
+require_tty() {
+    [[ -r /dev/tty && -w /dev/tty ]] ||
+        die 'This vault operation requires an interactive terminal (/dev/tty)'
+}
 
 valid_generation() { [[ "$1" =~ ^generation-[1-9][0-9]*$ ]]; }
 vault_dir() { printf '%s/%s\n' "$VAULT_ROOT" "$1"; }
@@ -102,7 +106,7 @@ verify_format_metadata() {
 
 read_vault_passphrase() {
     local prompt="$1" passphrase confirm
-    [[ -t 0 && -t 1 ]] || die 'Opening a plain dm-crypt vault requires an interactive TTY'
+    require_tty
     printf '%s: ' "$prompt" >&2
     IFS= read -r -s passphrase </dev/tty || die 'Could not read vault passphrase'
     printf '\n' >&2
@@ -121,7 +125,7 @@ read_vault_passphrase() {
 generate_vault_passphrase() {
     local answer
 
-    [[ -t 0 && -t 1 ]] || die 'Generating a vault passphrase requires an interactive TTY'
+    require_tty
     DMCRYPT_PASSPHRASE="$(openssl rand -hex 64)" ||
         die 'Cannot generate a random vault passphrase'
     [[ "$DMCRYPT_PASSPHRASE" =~ ^[[:xdigit:]]{128}$ ]] ||
@@ -347,7 +351,7 @@ unlink_private_keys() {
 
 confirm_migration() {
     local answer
-    [[ -t 0 && -t 1 ]] || die 'Migrating private keys requires an interactive TTY'
+    require_tty
     printf 'Move existing private signing material into the open vault and remove the unvaulted copies? [y/n] ' >/dev/tty
     IFS= read -r answer </dev/tty || die 'Could not read migration confirmation'
     case "$answer" in
