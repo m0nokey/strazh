@@ -1171,8 +1171,11 @@ install_core() {
     # every reboot.
     VERIFY_NVRAM=1
     # Never delete firmware-created fallback/setup records by default. A
-    # caller may opt into removing non-firmware records with --purge-foreign.
+    # caller may opt into removing non-firmware records with --purge-foreign,
+    # or explicitly request the destructive "keep only our shim" policy with
+    # --purge-all-nvram.
     NVRAM_PURGE_FOREIGN="${NVRAM_PURGE_FOREIGN:-0}"
+    NVRAM_PURGE_ALL="${NVRAM_PURGE_ALL:-0}"
 
     # strict knobs (golden defaults)
     STRICT_OWNER=0         # optional: require uid=0 gid=0 (only if you mount that way)
@@ -1214,6 +1217,8 @@ install_core() {
         { printf 'FAIL: Invalid VERIFY_NVRAM=%s\n' "$VERIFY_NVRAM" >&2; exit 1; }
     [[ "$NVRAM_PURGE_FOREIGN" =~ ^[01]$ ]] ||
         { printf 'FAIL: Invalid NVRAM_PURGE_FOREIGN=%s\n' "$NVRAM_PURGE_FOREIGN" >&2; exit 1; }
+    [[ "$NVRAM_PURGE_ALL" =~ ^[01]$ ]] ||
+        { printf 'FAIL: Invalid NVRAM_PURGE_ALL=%s\n' "$NVRAM_PURGE_ALL" >&2; exit 1; }
     case "$ESP_CFG_MODE" in
         embedded|external) ;;
         *) printf 'FAIL: Invalid ESP_CFG_MODE=%s (expected embedded or external)\n' "$ESP_CFG_MODE" >&2; exit 1 ;;
@@ -2207,6 +2212,19 @@ install_core() {
         return 1
     }
 
+    verify_public_keys_present() {
+        local -a public_keys=( "PK.crt" "KEK.crt" "db.crt" )
+        local missing=0 k
+        for k in "${public_keys[@]}"; do
+            if [[ ! -s "$KEY_DIR/$k" || -L "$KEY_DIR/$k" ]]; then
+                missing=1
+                warn "Missing public key file: $KEY_DIR/$k"
+            fi
+        done
+        [[ "$missing" -eq 0 ]] && { ok "UEFI public key material present in $KEY_DIR"; return 0; }
+        return 1
+    }
+
     # ==============================================================================
     # Normalize db cert to PEM (needed for sbsign/sbverify)
     # ==============================================================================
@@ -2214,7 +2232,6 @@ install_core() {
 
     ensure_db_cert_pem() {
         [[ -s "$DB_CRT" ]] || die "Missing db cert: $DB_CRT"
-        [[ -s "$DB_KEY" ]] || die "Missing db key: $DB_KEY"
 
         local out="$KEY_DIR/db.pem"
         if openssl x509 -in "$DB_CRT" -inform PEM -noout >/dev/null 2>&1; then
@@ -2232,6 +2249,14 @@ install_core() {
         fi
 
         die "db cert is not valid X509 PEM/DER: $DB_CRT"
+    }
+
+    ensure_db_signing_key() {
+        ensure_db_cert_pem
+        [[ -s "$DB_KEY" ]] ||
+            die "Private-key vault is closed; run 'strazh --vault-open' before signing"
+        [[ ! -L "$DB_KEY" || -e "$DB_KEY" ]] ||
+            die "Private-key vault is closed; run 'strazh --vault-open' before signing"
     }
 
     # ==============================================================================
@@ -2312,7 +2337,7 @@ install_core() {
     sign_one_strict() {
         local f="$1"
         [[ -f "$f" ]] || die "Missing EFI file: $f"
-        ensure_db_cert_pem
+        ensure_db_signing_key
 
         local dir base work out
         dir="$(dirname "$f")"
@@ -2544,7 +2569,7 @@ install_core() {
         verify_structure   || die "Refusing to repin: structure failed"
         verify_perms_types || die "Refusing to repin: perms/types failed"
         verify_stub_cfgs   || die "Refusing to repin: embedded/legacy stub verification failed"
-        verify_keys_present|| die "Refusing to repin: missing keys"
+        verify_public_keys_present || die "Refusing to repin: missing public keys"
 
         local efi_id; efi_id="$(detect_efi_id)"
         local sys_dir="/EFI/$efi_id"
@@ -2798,8 +2823,14 @@ install_core() {
         while IFS=$'\t' read -r bn label path; do
             local pnorm; pnorm="$(printf '%s' "$path" | nvram_norm)"
             if [[ "$pnorm" == "$(printf '%s' "$want_path" | nvram_norm)" ]]; then
-                bn_keep="$bn"
-            elif [[ "$NVRAM_PURGE_FOREIGN" -eq 1 ]] && ! nvram_is_firmware_record "$label" "$path"; then
+                if [[ -z "$bn_keep" ]]; then
+                    bn_keep="$bn"
+                elif [[ "$NVRAM_PURGE_ALL" -eq 1 ]]; then
+                    # Keep exactly one record for the canonical shim path.
+                    purge_bns+=("$bn")
+                fi
+            elif [[ "$NVRAM_PURGE_ALL" -eq 1 ]] ||
+                { [[ "$NVRAM_PURGE_FOREIGN" -eq 1 ]] && ! nvram_is_firmware_record "$label" "$path"; }; then
                 purge_bns+=("$bn")
             fi
         done < <(nvram_list_entries)
@@ -2822,12 +2853,22 @@ install_core() {
             for bn in "${purge_bns[@]}"; do
                 nvram_delete_bootnum "$bn"
             done
-            warn "NVRAM: purged ${#purge_bns[@]} non-firmware records"
+            if [[ "$NVRAM_PURGE_ALL" -eq 1 ]]; then
+                warn "NVRAM: purged ${#purge_bns[@]} records; only the current shim was retained"
+            else
+                warn "NVRAM: purged ${#purge_bns[@]} non-firmware records"
+            fi
+        elif [[ "$NVRAM_PURGE_ALL" -eq 1 ]]; then
+            ok "NVRAM: no extra records found; only the current shim is present"
         else
             ok "NVRAM: retained non-primary records; shim remains first"
         fi
 
-        ok "NVRAM: policy enforced (shim first; firmware records retained)"
+        if [[ "$NVRAM_PURGE_ALL" -eq 1 ]]; then
+            ok "NVRAM: policy enforced (ONLY current shim retained)"
+        else
+            ok "NVRAM: policy enforced (shim first; firmware records retained)"
+        fi
         log "=== FIX DONE (nvram) ==="
     }
 
@@ -2862,7 +2903,7 @@ install_core() {
         local out="$2"
         local work="${out}.work"
         [[ -s "$src" ]] || die "Missing EFI source: $src"
-        ensure_db_cert_pem
+        ensure_db_signing_key
         run cp -a "$src" "$work"
         run sbattach --remove "$work" >/dev/null 2>&1 || true
         run sbsign --key "$DB_KEY" --cert "$DB_CRT_PEM" --output "$out" "$work" >/dev/null
@@ -2985,6 +3026,7 @@ install_core() {
         # runs.  Therefore the embedded config must be shipped together with
         # its detached GPG signature (the same pattern used by the tested
         # Debian/ACRN implementations).
+        gpg_require_present
         gpg_id="$(gpg_fpr || true)"
         [[ -n "$gpg_id" ]] || die "Missing GPG signing key for embedded GRUB config"
         run gpg --homedir "$GPG_HOME" --batch --yes \
@@ -3295,6 +3337,14 @@ video video_fb gfxterm gettext gzio gcry_crc bli efi_gop"
     # ==============================================================================
     ensure_state_dirs() {
         run install -d -m 0700 -o root -g root "$STATE_ROOT" "$KEY_DIR" "$PIN_DIR"
+        # After vault migration, $STATE_ROOT/gpg is a link into the mounted
+        # runtime vault. Do not try to create/chmod its target during a
+        # read-only verification while the vault is closed.
+        if [[ -L "$STATE_ROOT/gpg" ]]; then
+            run install -d -m 0700 -o root -g root "$STATE_ROOT/backups" "$ESP_BACKUP_DIR"
+            run install -d -m 0700 -o root -g root "$STATE_ROOT/keys/grub"
+            return 0
+        fi
         run install -d -m 0700 -o root -g root "$STATE_ROOT/gpg" "$STATE_ROOT/backups" "$ESP_BACKUP_DIR"
         run install -d -m 0700 -o root -g root "$STATE_ROOT/keys/grub"
     }
@@ -3330,6 +3380,9 @@ video video_fb gfxterm gettext gzio gcry_crc bli efi_gop"
     gpg_fpr() { [[ -s "$GPG_FPR_FILE" ]] && cat "$GPG_FPR_FILE" && return 0; return 1; }
 
     gpg_require_present() {
+        if [[ -L "$GPG_HOME" && ! -e "$GPG_HOME" ]]; then
+            die "Private-key vault is closed; run 'strazh --vault-open' before signing"
+        fi
         [[ -d "$GPG_HOME" ]] || die "GPG key missing. Run: sb-install --init-gpg-keys"
         [[ -s "$GPG_FPR_FILE" ]] || die "GPG key missing (no $GPG_FPR_FILE). Run: sb-install --init-gpg-keys"
         local fpr; fpr="$(gpg_fpr || true)"
@@ -3709,14 +3762,14 @@ video video_fb gfxterm gettext gzio gcry_crc bli efi_gop"
     }
 
     gpg_verify_runtime_files_strict() {
-        local f
+        local f verify_home="${GPG_VERIFY_HOME:-$GPG_HOME}"
         while IFS= read -r f; do
             [[ -n "$f" ]] || continue
             [[ "$f" == *.sig ]] && continue
 
             [[ -f "$f" ]] || die "GRUB runtime file missing: $f"
             [[ -f "$f.sig" ]] || die "Missing signature: $f.sig"
-            gpg --homedir "$GPG_HOME" --verify "$f.sig" "$f" >/dev/null 2>&1 || die "GPG verify failed: $f"
+            gpg --homedir "$verify_home" --verify "$f.sig" "$f" >/dev/null 2>&1 || die "GPG verify failed: $f"
             ok "RUNTIME SIG OK: $f"
         done < <(grub_collect_runtime_files | sed '/^$/d' | sort -u)
         ok "GPG: GRUB runtime files signatures OK"
@@ -3746,8 +3799,9 @@ video video_fb gfxterm gettext gzio gcry_crc bli efi_gop"
     }
 
     gpg_verify_boot_artifacts() {
+        local verify_home="${GPG_VERIFY_HOME:-$GPG_HOME}"
         [[ -f /boot/grub/grub.cfg && -f /boot/grub/grub.cfg.sig ]] || die "Missing grub.cfg signature"
-        gpg --homedir "$GPG_HOME" --verify /boot/grub/grub.cfg.sig /boot/grub/grub.cfg >/dev/null 2>&1 \
+        gpg --homedir "$verify_home" --verify /boot/grub/grub.cfg.sig /boot/grub/grub.cfg >/dev/null 2>&1 \
             || die "GPG verify failed: /boot/grub/grub.cfg"
 
         local f
@@ -3755,11 +3809,23 @@ video video_fb gfxterm gettext gzio gcry_crc bli efi_gop"
             [[ -f "$f" ]] || continue
             [[ "$f" == *.sig ]] && continue
             [[ -f "$f.sig" ]] || die "Missing signature: $f.sig"
-            gpg --homedir "$GPG_HOME" --verify "$f.sig" "$f" >/dev/null 2>&1 || die "GPG verify failed: $f"
+            gpg --homedir "$verify_home" --verify "$f.sig" "$f" >/dev/null 2>&1 || die "GPG verify failed: $f"
         done
     }
 
-    verify_gpg_layer() {
+    verify_gpg_layer() (
+        local verify_home
+        verify_home="$(mktemp -d -p /run .sb-guard-gpg-verify.XXXXXX)" ||
+            die "Cannot create temporary GPG verification home"
+        chmod 0700 "$verify_home"
+        trap 'rm -rf -- "$verify_home"' EXIT
+        [[ -f "$GRUB_GPG_KEY_FILE" ]] ||
+            die "GPG public key missing: $GRUB_GPG_KEY_FILE"
+        gpg --homedir "$verify_home" --batch --no-auto-key-retrieve \
+            --import "$GRUB_GPG_KEY_FILE" >/dev/null 2>&1 ||
+            die "Cannot import the public GRUB GPG key for verification"
+        GPG_VERIFY_HOME="$verify_home"
+
         local rc=0
         [[ -x "$GRUB_SNIPPET" ]] && ok "GPG: GRUB snippet present: $GRUB_SNIPPET" || { fail "GPG: GRUB snippet missing: $GRUB_SNIPPET"; rc=1; }
         [[ -f "$GRUB_GPG_KEY_FILE" ]] && ok "GPG: GRUB public key present: $GRUB_GPG_KEY_FILE" || { fail "GPG: GRUB public key missing: $GRUB_GPG_KEY_FILE"; rc=1; }
@@ -3790,7 +3856,7 @@ video video_fb gfxterm gettext gzio gcry_crc bli efi_gop"
             gpg_verify_runtime_files_strict
         fi
         return "$rc"
-    }
+    )
 
     fix_gpg() {
         log "=== FIX BEGIN (gpg) ==="
@@ -3843,7 +3909,7 @@ video video_fb gfxterm gettext gzio gcry_crc bli efi_gop"
         try_check verify_structure
         try_check verify_perms_types
         try_check verify_stub_cfgs
-        try_check verify_keys_present
+        try_check verify_public_keys_present
 
         try_check verify_efi_sig_strict "$ESP_MNT/EFI/$efi_id/shimx64.efi"
         if [[ "$VERIFY_SHIM_VENDOR" -eq 1 ]]; then
@@ -4113,6 +4179,7 @@ video video_fb gfxterm gettext gzio gcry_crc bli efi_gop"
       --fix-sign              strict re-sign grubx64.efi (+ mmx64.efi if KEEP_MMX=1); shim must already be signed
       --fix-nvram             make our shim first in BootOrder (retain other records)
       --purge-foreign         with --fix-nvram/--fix-all, delete non-firmware records
+      --purge-all-nvram       with --fix-nvram, delete every other Boot#### record (including firmware utilities)
       --fix-pins              repin ONLY if all strict preconditions pass
       --fix-gpg               requires existing GPG key; ensure snippet+keys+signatures
       --fix-all               FULL strict pipeline (includes repin)
@@ -4133,7 +4200,7 @@ video video_fb gfxterm gettext gzio gcry_crc bli efi_gop"
     Env overrides:
       ESP_MNT, STATE_ROOT, KEY_DIR, PIN_DIR, ESP_BACKUP_DIR, DB_CRT, DB_KEY,
       GRUB_MONOLITH, GRUB_BUILD_MODE, GRUB_BUILD_PROFILE,
-      GRUB_PROFILE_ENV, MMX_SRC, NVRAM_LABEL, NVRAM_PURGE_FOREIGN,
+      GRUB_PROFILE_ENV, MMX_SRC, NVRAM_LABEL, NVRAM_PURGE_FOREIGN, NVRAM_PURGE_ALL,
       KEEP_MMX, KEEP_BOOT_DIR, REFRESH_SHIM, REFRESH_MMX
 
     Notes:
@@ -4260,6 +4327,7 @@ video video_fb gfxterm gettext gzio gcry_crc bli efi_gop"
                 --refresh-shim) REFRESH_SHIM=1 ;;
                 --refresh-mmx) REFRESH_MMX=1 ;;
                 --purge-foreign) NVRAM_PURGE_FOREIGN=1 ;;
+                --purge-all-nvram) MODE="fix-nvram"; NVRAM_PURGE_ALL=1 ;;
 
                 -h|--help) usage; exit 0 ;;
                 *) die "Unknown arg: $1" ;;
@@ -4432,6 +4500,42 @@ install_event_dispatcher() {
 
     event_dir="/var/lib/sb-guard/events"
     package_active=/run/sb-guard-package-active
+    package_snapshot=/run/sb-guard-boot-snapshot
+
+    # APT invokes this dispatcher for every dpkg transaction.  Only queue a
+    # reconcile when a boot package version or a boot artifact actually
+    # changed; ordinary application updates must not require the private-key
+    # vault to be open.
+    snapshot_boot_state() {
+        {
+            printf '%s\n' '[boot-packages]'
+            dpkg-query -W -f='${binary:Package}=${Version}\n' 2>/dev/null |
+                grep -E '^(grub|shim|linux-image|linux-modules|proxmox-kernel|proxmox-default-kernel|pve-kernel|initramfs-tools)' |
+                sort || true
+            printf '%s\n' '[boot-files]'
+            if [[ -d /boot ]]; then
+                find /boot -xdev -type f \
+                    \( -path '/boot/grub/*' -o -name 'vmlinuz-*' -o \
+                    -name 'initrd.img-*' -o -name 'System.map-*' -o \
+                    -name 'config-*' \) -print0 |
+                    sort -z | xargs -0r sha256sum || true
+            fi
+        }
+    }
+
+    queue_refresh_event() {
+        local reason="${1:-boot state changed}" event event_tmp
+        install -d -m 0700 -o root -g root "$event_dir"
+        event="$event_dir/refresh.$(date +%s%N).$$"
+        event_tmp="${event}.tmp"
+        printf '%s\n' "$reason" >"$event_tmp"
+        chmod 0600 "$event_tmp"
+        mv -f "$event_tmp" "$event"
+        # Never wait inside an APT/dpkg hook. systemd coalesces starts of this
+        # oneshot unit; sb-guard itself provides the cross-trigger flock.
+        systemctl start --no-block sb-guard.service >/dev/null 2>&1 || true
+    }
+
     case "${1:-refresh}" in
         --package-begin)
             # DPkg::Pre-Invoke runs in a child of the dpkg process that still
@@ -4442,6 +4546,9 @@ install_event_dispatcher() {
                 chmod 0600 "$package_active.new"
                 mv -f "$package_active.new" "$package_active"
             fi
+            snapshot_boot_state >"$package_snapshot.new"
+            chmod 0600 "$package_snapshot.new"
+            mv -f "$package_snapshot.new" "$package_snapshot"
             exit 0
             ;;
         --package-end)
@@ -4449,6 +4556,14 @@ install_event_dispatcher() {
             # is advisory; the worker performs a fresh non-blocking check of
             # both real dpkg lock files before any build or ESP operation.
             rm -f -- "$package_active" "$package_active.new"
+            after_snapshot="${package_snapshot}.after"
+            snapshot_boot_state >"$after_snapshot"
+            if [[ ! -s "$package_snapshot" ]] ||
+                ! cmp -s "$package_snapshot" "$after_snapshot"; then
+                queue_refresh_event 'boot package or boot artifact changed'
+            fi
+            rm -f -- "$package_snapshot" "$package_snapshot.new" "$after_snapshot"
+            exit 0
             ;;
         refresh)
             # During the manual firmware-enrollment pause the public bundle is
@@ -4461,13 +4576,7 @@ install_event_dispatcher() {
         *) exit 2 ;;
     esac
 
-    install -d -m 0700 -o root -g root "$event_dir"
-    event="$event_dir/refresh.$(date +%s%N).$$"
-    : >"$event"
-
-    # Never wait inside an APT/dpkg hook. systemd coalesces starts of this
-    # oneshot unit; sb-guard itself provides the cross-trigger flock.
-    systemctl start --no-block sb-guard.service >/dev/null 2>&1 || true
+    queue_refresh_event 'manual or filesystem boot refresh requested'
 EOF
     ok "installed event dispatcher -> $EVENT_DST"
 }
@@ -4489,14 +4598,19 @@ install_reconcile_worker() {
     event_dir=/var/lib/sb-guard/events
     install -d -m 0700 -o root -g root "$event_dir"
 
-    first=1
     for ((pass = 1; pass <= 32; pass++)); do
         mapfile -d '' events < <(find "$event_dir" -maxdepth 1 -type f -name 'refresh.*' -print0 | sort -z)
-        if [[ "$first" -eq 0 && "${#events[@]}" -eq 0 ]]; then
+        if [[ "${#events[@]}" -eq 0 ]]; then
             exit 0
         fi
-        first=0
 
+        # The worker is non-interactive by design.  It must never invent a
+        # replacement key or block waiting for a terminal passphrase.
+        if [[ -L /var/lib/sb-guard/keys/db.key &&
+            ! -e /var/lib/sb-guard/keys/db.key ]]; then
+            printf '%s\n' "ERROR: private-key vault is closed; run 'strazh --vault-open' before the update" >&2
+            exit 1
+        fi
         /usr/local/sbin/sb-guard-svc --fix-all
 
         if [[ "${#events[@]}" -gt 0 ]]; then

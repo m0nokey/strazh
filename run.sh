@@ -25,6 +25,11 @@ PVE_STAGE_FILE="/var/lib/pve-install.stage"
 FDE_KEYFILE_PATH="/etc/cryptsetup-keys.d/root.key"
 STRAZH_HOST_CLI_DST="/usr/local/sbin/strazh"
 STRAZH_HOST_CLI_SOURCE="$SCRIPT_DIR/lib/strazh_host_cli.sh"
+STRAZH_KEY_VAULT_DST="/usr/local/sbin/strazh-key-vault"
+STRAZH_KEY_VAULT_SOURCE="$SCRIPT_DIR/lib/strazh_key_vault.sh"
+STRAZH_KEY_VAULT_GENERATION="generation-1"
+STRAZH_PLATFORM_GUARD_DST="/usr/local/sbin/strazh-platform-guard"
+STRAZH_PLATFORM_GUARD_SOURCE="$SCRIPT_DIR/lib/strazh_platform_guard.sh"
 RESUME_UNIT="strazh-resume.service"
 RESUME_UNIT_FILE="/etc/systemd/system/$RESUME_UNIT"
 # Before custom Secure Boot is enrolled, one ordinary Debian EFI loader must
@@ -180,6 +185,22 @@ run_quiet_step() {
     return "$rc"
 }
 
+run_interactive_step() {
+    local label="$1" rc
+    shift
+    ui_step_start "$label"
+    set +e
+    "$@"
+    rc=$?
+    set -e
+    if ((rc == 0)); then
+        ui_step_ok "$label"
+        return 0
+    fi
+    ui_step_fail "$label (rc=$rc)"
+    return "$rc"
+}
+
 die() {
     log "ERROR: $*"
     exit 1
@@ -231,6 +252,80 @@ install_host_cli() (
     trap - EXIT
     ok "installed host administration utility -> $STRAZH_HOST_CLI_DST"
 )
+
+install_platform_guard_cli() (
+    local tmp
+
+    [[ -r "$STRAZH_PLATFORM_GUARD_SOURCE" ]] ||
+        die "Platform integrity helper is missing: $STRAZH_PLATFORM_GUARD_SOURCE"
+    install -d -m 0755 -o root -g root "$(dirname "$STRAZH_PLATFORM_GUARD_DST")"
+    tmp="$(mktemp "${STRAZH_PLATFORM_GUARD_DST}.tmp.XXXXXX")" ||
+        die "Cannot create temporary platform helper: $STRAZH_PLATFORM_GUARD_DST"
+    trap 'rm -f -- "$tmp"' EXIT
+
+    install -m 0750 -o root -g root "$STRAZH_PLATFORM_GUARD_SOURCE" "$tmp" ||
+        die "Cannot stage platform helper: $STRAZH_PLATFORM_GUARD_DST"
+    bash -n "$tmp" || die "Platform helper failed syntax validation"
+    mv -f -- "$tmp" "$STRAZH_PLATFORM_GUARD_DST" ||
+        die "Cannot publish platform helper: $STRAZH_PLATFORM_GUARD_DST"
+    trap - EXIT
+    ok "installed optional platform integrity helper -> $STRAZH_PLATFORM_GUARD_DST"
+)
+
+install_key_vault_cli() (
+    local tmp
+
+    [[ -r "$STRAZH_KEY_VAULT_SOURCE" ]] ||
+        die "Key vault helper is missing: $STRAZH_KEY_VAULT_SOURCE"
+    install -d -m 0755 -o root -g root "$(dirname "$STRAZH_KEY_VAULT_DST")"
+    tmp="$(mktemp "${STRAZH_KEY_VAULT_DST}.tmp.XXXXXX")" ||
+        die "Cannot create temporary key vault helper: $STRAZH_KEY_VAULT_DST"
+    trap 'rm -f -- "$tmp"' EXIT
+
+    install -m 0750 -o root -g root "$STRAZH_KEY_VAULT_SOURCE" "$tmp" ||
+        die "Cannot stage key vault helper: $STRAZH_KEY_VAULT_DST"
+    bash -n "$tmp" || die "Key vault helper failed syntax validation"
+    mv -f -- "$tmp" "$STRAZH_KEY_VAULT_DST" ||
+        die "Cannot publish key vault helper: $STRAZH_KEY_VAULT_DST"
+    trap - EXIT
+    ok "installed private-key vault helper -> $STRAZH_KEY_VAULT_DST"
+)
+
+key_vault_path() {
+    printf '/var/lib/sb-guard/keys/vault/%s/private-keys.dmcrypt\n' \
+        "$STRAZH_KEY_VAULT_GENERATION"
+}
+
+key_vault_present() {
+    [[ -s "$(key_vault_path)" && -s \
+        "/var/lib/sb-guard/keys/vault/$STRAZH_KEY_VAULT_GENERATION/format.conf" ]]
+}
+
+key_vault_open_for_signing() {
+    key_vault_present || die "Private-key vault is not initialized"
+    run_interactive_step 'Secure Boot: unlock private-key vault' \
+        "$STRAZH_KEY_VAULT_DST" open "$STRAZH_KEY_VAULT_GENERATION" || return $?
+    "$STRAZH_KEY_VAULT_DST" link "$STRAZH_KEY_VAULT_GENERATION" >/dev/null 2>&1 ||
+        die "Cannot link private signing material from the key vault"
+}
+
+key_vault_close_after_signing() {
+    key_vault_present || return 0
+    "$STRAZH_KEY_VAULT_DST" close "$STRAZH_KEY_VAULT_GENERATION" >/dev/null 2>&1 ||
+        log "ERROR: cannot close private-key vault"
+}
+
+key_vault_initialize_after_key_generation() {
+    key_vault_present && return 0
+    run_interactive_step 'Secure Boot: create private-key vault' \
+        "$STRAZH_KEY_VAULT_DST" create "$STRAZH_KEY_VAULT_GENERATION" || return $?
+    key_vault_open_for_signing || return $?
+    run_interactive_step 'Secure Boot: move private keys into vault' \
+        "$STRAZH_KEY_VAULT_DST" migrate "$STRAZH_KEY_VAULT_GENERATION" || return $?
+    "$STRAZH_KEY_VAULT_DST" link "$STRAZH_KEY_VAULT_GENERATION" >/dev/null 2>&1 ||
+        die "Cannot link migrated private signing material"
+}
+
 
 acquire_lock() {
     ((LOCK_HELD == 1)) && return 0
@@ -948,13 +1043,14 @@ secure_boot_db_is_enrolled() (
 )
 
 secure_boot_stage() (
+    local key_vault_opened=0
     [[ -d /sys/firmware/efi ]] || die "System must be booted in UEFI mode"
     need_cmd systemctl
     quarantine_pve_enterprise_sources || die "Cannot disable Proxmox enterprise repository"
     secure_boot_remember_workers
     printf '%s\n' "$$" > /run/sb-guard-installing
     chmod 0600 /run/sb-guard-installing
-    trap 'rc=$?; rm -f -- /run/sb-guard-installing; if ((rc != 0)); then install -D -m 0600 -o root -g root /dev/null "$SB_GUARD_ENROLLMENT_HOLD" || true; fi; secure_boot_restore_workers_on_failure || true; exit "$rc"' EXIT
+    trap 'rc=$?; rm -f -- /run/sb-guard-installing; if ((key_vault_opened == 1)); then key_vault_close_after_signing || true; fi; if ((rc != 0)); then install -D -m 0600 -o root -g root /dev/null "$SB_GUARD_ENROLLMENT_HOLD" || true; fi; secure_boot_restore_workers_on_failure || true; exit "$rc"' EXIT
     trap 'exit 130' INT TERM
     exec 200>"$SB_GUARD_LOCK_FILE"
     flock -w 300 200 || die "Could not acquire lock: $SB_GUARD_LOCK_FILE"
@@ -980,6 +1076,14 @@ secure_boot_stage() (
     install -D -m 0750 -o root -g root \
         "$SCRIPT_DIR/lib/sb_shim_build_custom.sh" "$SECURE_BOOT_CUSTOM_BUILDER_DST" ||
         die "Cannot install custom shim builder"
+
+    # Existing private keys are linked into the vault.  A closed vault makes
+    # signing paths unavailable and the stage must ask for its passphrase
+    # before any private-key operation can begin.
+    if key_vault_present; then
+        key_vault_open_for_signing || die "Private-key vault unlock failed"
+        key_vault_opened=1
+    fi
 
     [[ "$SECURE_BOOT_MODE" == install-only ]] && {
         log "Lifecycle installed but not activated (--secure-boot-install-only)."
@@ -1009,6 +1113,11 @@ secure_boot_stage() (
     run_quiet_step 'Secure Boot: initialize GPG trust root' \
         /usr/local/sbin/sb-install --init-gpg-keys ||
         die "GPG key initialization failed"
+    if ! key_vault_present; then
+        key_vault_initialize_after_key_generation ||
+            die "Private-key vault initialization failed"
+        key_vault_opened=1
+    fi
     run_quiet_step 'Secure Boot: build or reuse custom shim' \
         /usr/local/sbin/sb-shim-auto-build ||
         die "Custom shim source build failed"
@@ -1251,7 +1360,9 @@ run_secure_boot_stage() {
     schedule_reboot 'Reboot into UEFI, enroll PK/KEK/db, enable Secure Boot, boot Debian, then run bash ./run.sh again.'
 }
 
-run_release_stage() {
+run_release_stage() (
+    local key_vault_opened=0
+    trap 'if ((key_vault_opened == 1)); then key_vault_close_after_signing || true; fi' EXIT
     pve_ready || die "A running PVE kernel and proxmox-ve are required before the production release"
     case "$(state_get phase)" in
         secure_boot_done|release_pending|release_running|complete) ;;
@@ -1260,6 +1371,9 @@ run_release_stage() {
     sb_guard_ready || die "Complete Stage 3 (Secure Boot) first"
     db_is_enrolled || die "The production bundle requires db.crt enrollment"
     [[ -x /usr/local/sbin/sb-guard-svc ]] || die "sb-guard-svc was not found"
+    key_vault_open_for_signing || die "Private-key vault unlock failed"
+    # shellcheck disable=SC2034 # consumed by the EXIT trap above.
+    key_vault_opened=1
 
     set_phase release_running
     RUNNING_PHASE=release_running
@@ -1286,7 +1400,7 @@ run_release_stage() {
     state_set completed_at "$(date -Is)"
     RUNNING_PHASE=""
     log "Strazh pipeline complete: run sb-guard verify for the final RESULT: OK."
-}
+)
 
 advance_pipeline() {
     local phase marker_valid
@@ -1535,6 +1649,8 @@ main() {
     # It is copied, not symlinked, so removing the clone later does not remove
     # the passphrase-management utility.
     install_host_cli
+    install_key_vault_cli
+    install_platform_guard_cli
 
     # Start every interactive run with a clean screen.  The helper is a
     # no-op for redirected/non-interactive output, so logs remain intact.

@@ -113,6 +113,9 @@ host_plain = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", host_decoded).replace("\r", ""
 assert "Strazh — host administration" in host_plain
 assert host_plain.count("Strazh — host administration") >= 2
 assert "Press Enter or Space to return to the menu." in host_plain
+assert "6. Purge Other NVRAM Boot Entries" in host_plain
+assert "7. Private-key Vault" in host_plain
+assert "8. Platform Integrity Guard" in host_plain
 
 # y/n validation rejects an invalid answer and accepts a later valid one.
 confirm_script = r'''

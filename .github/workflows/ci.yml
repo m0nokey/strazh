@@ -27,6 +27,8 @@ jobs:
           bash tests/check_static.sh
           bash tests/check_provenance.sh
           bash tests/check_artifact_contract.sh
+          bash tests/check_key_vault.sh
+          bash tests/check_update_vault_gate.sh
 
   ui:
     name: Terminal UI checks
@@ -45,6 +47,15 @@ jobs:
         uses: actions/checkout@v4
       - name: Run state-machine checks
         run: bash tests/check_logic.sh
+
+  platform_guard:
+    name: Optional platform integrity guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Run board and firmware digest checks
+        run: bash tests/check_platform_guard.sh
 
   fde:
     name: Disposable FDE loopback

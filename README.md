@@ -307,10 +307,14 @@ Every pull request runs the fast, non-destructive checks:
   English-only text, `x`, `?`, `y/n` and Enter/Space handling;
 - `logic`: atomic state updates, stale reboot markers, lock release after a
   failed child and descriptor isolation;
+- `platform_guard`: synthetic DMI/firmware fixtures covering baseline capture,
+  BIOS-update maintenance, unchanged-board approval and mismatch detection;
 - `fde`: a disposable loopback LUKS2 container with a long one-run test
   passphrase, PBKDF2 human slot, Argon2id keyfile slot and both unlock checks;
 - `artifact-contract`: static assertions for the GRUB/shim/SBAT/GPG and
   single-signature contract.
+- `update-vault-gate`: verifies that ordinary APT transactions do not queue a
+  signing worker and that boot updates require an explicitly unlocked vault.
 
 The full GRUB and custom shim source build runs on pushes to `main`, through
 `workflow_dispatch`, and weekly. It uses a privileged disposable Debian
@@ -328,8 +332,59 @@ bash tests/check_ui.sh
 bash tests/check_logic.sh
 bash tests/check_provenance.sh
 bash tests/check_artifact_contract.sh
+bash tests/check_key_vault.sh
+bash tests/check_update_vault_gate.sh
+bash tests/check_platform_guard.sh
 sudo bash tests/check_fde_loopback.sh
 ```
+
+## Private-key vault
+
+During Secure Boot preparation, Strazh creates a per-host plain dm-crypt vault
+at `/var/lib/sb-guard/keys/vault/generation-1/private-keys.dmcrypt`. The
+generated 128-hex passphrase is displayed once on the controlling TTY and is
+never written to logs, state or the repository. The private PK/KEK/db keys and
+the GPG secret home are moved into the mounted vault; the legacy paths under
+`/var/lib/sb-guard/keys` become links that are usable only while the vault is
+open. Public certificates and detached verification material remain outside
+the vault.
+
+The vault uses fixed plain dm-crypt parameters (AES-XTS, 512-bit key,
+SHA-512, 512-byte sectors) and an ext4 marker inside the container. It has no
+LUKS metadata or recovery header. Losing the passphrase or changing any
+format parameter makes that generation unrecoverable; keep the passphrase in a
+separate secure recovery location.
+
+The installer asks for the vault passphrase before every private-key build or
+release operation. The vault is closed again before a reboot or when the
+operation finishes. Secure Boot verification, which uses public material, does
+not require the passphrase.
+
+`apt-get update` never needs the vault because it only downloads repository
+metadata. An install or upgrade needs the vault only when it changes GRUB,
+shim, a kernel, initramfs or another `/boot` artifact. The APT hook compares
+boot-package versions and boot-file digests before queuing the worker, so an
+ordinary application update is ignored.
+
+APT/kernel/shim workers are deliberately non-interactive and fail-closed when
+the vault is closed. For an update that may touch the boot chain, unlock it
+explicitly, run the update, and close it afterward:
+
+```bash
+strazh --vault-open
+apt-get upgrade
+# --vault-close waits for the queued sb-guard worker to finish.
+strazh --vault-close
+```
+
+`strazh --vault-close` does not close the container while a reconcile is still
+running or queued. If the worker fails, the vault remains open so the operator
+can inspect the error and retry; it never falls back to an unprotected key.
+
+For a one-off manual repair, `strazh --reconcile` asks for the passphrase,
+opens the vault only for that transaction and closes it automatically. A
+closed vault never causes Strazh to generate or use an unprotected replacement
+key.
 
 ## Reboots and recovery
 
@@ -367,6 +422,12 @@ strazh --change-fde-passphrase
 strazh --verify
 strazh --reconcile
 strazh --restore
+strazh --purge-nvram
+strazh --vault-status
+strazh --vault-open
+strazh --vault-close
+strazh --platform-status
+strazh --platform-verify
 ```
 
 The interactive host menu contains only administrative operations:
@@ -384,6 +445,12 @@ Strazh — host administration
    Build, verify and atomically deploy the approved boot set
 5. Restore Last Known-good Boot Set
    Restore the verified rollback copy after a failed update
+6. Purge Other NVRAM Boot Entries
+   Keep only the current Strazh shim entry; remove every other Boot#### record
+7. Private-key Vault
+   Unlock or close the encrypted container used for signing operations
+8. Platform Integrity Guard
+   Optionally monitor board and firmware identity across BIOS updates
 
 x. Exit
 
@@ -392,6 +459,47 @@ x. Exit
 
 Status and error screens wait for `Enter` or `Space` before returning to the
 menu. Unknown keys are ignored.
+
+### Optional platform integrity guard
+
+The installer also exports `/usr/local/sbin/strazh-platform-guard`. It is
+disabled by default and does not block boot. When enabled, it records two
+separate SHA-256 payloads: a board identity (UUID, serial, vendor, model and
+revision) and a firmware identity (BIOS vendor/version/revision/date plus the
+firmware-exposed DMI/SMBIOS table bytes). An operator may additionally supply
+an exact vendor firmware image or dump with `--firmware-image PATH`; Strazh
+hashes that file but never reads SPI flash through `/dev/mem`.
+
+Use the interactive `strazh` menu, or the equivalent commands:
+
+```bash
+strazh --platform-status
+strazh --platform-enable [--firmware-image /path/to/current-image.bin]
+strazh --platform-verify
+strazh --platform-disable-for-update
+# update BIOS/firmware while the maintenance window is open
+strazh --platform-capture-after-update --firmware-image /path/to/new-image.bin
+strazh --platform-finalize-update
+```
+
+Finalization refuses to approve a candidate when the board digest changes.
+Firmware changes are shown as an explicit old-to-new transition and require
+confirmation. If an image was captured, its digest is retained as audit
+evidence; live verification compares it only when the same image path is
+supplied, because the image need not remain on the host.
+
+This is an optional host-side integrity signal, not a hardware root of trust.
+SMBIOS values can be changed by firmware or a hypervisor, and a VM cannot prove
+physical-board identity. Custom PK/KEK/db Secure Boot signatures still protect
+the boot artifacts. A future signed GRUB `platform.policy` adapter would be a
+separate feature and is not enabled by this monitor.
+
+`strazh --purge-nvram` is an explicit destructive operation. It keeps the
+current Strazh shim as the sole `BootOrder` entry and deletes every other
+`Boot####` record, including firmware setup/recovery entries. Installation and
+APT updates never perform this operation automatically. Some firmware may
+recreate setup entries on the next boot; keep an accessible physical or BMC
+console before using it.
 
 ### Changing the FDE passphrase
 
@@ -467,6 +575,8 @@ The public project contains one entry point and private implementation files:
 ```text
 run.sh                         # menu and resumable installation state machine
 lib/strazh_host_cli.sh         # exported host administration utility
+lib/strazh_key_vault.sh        # root-only plain dm-crypt private-key vault
+lib/strazh_platform_guard.sh   # optional board/firmware integrity monitor
 lib/fde_debian_net_install.sh  # Debian FDE implementation
 lib/sb_proxmox.sh              # Proxmox package/kernel stage
 lib/sb_guard_install.sh        # sb-guard lifecycle installer
@@ -481,9 +591,9 @@ README.md                       # English documentation
 The installer exports the host and Secure Boot commands under
 `/usr/local/sbin/`, including `strazh`, `sb-guard`, `sb-guard-svc`,
 `sb-guard-worker`, `sb-guard-event`, `sb-guard-rollback`, `sb-install`, the
-shim builders and the shared build-root helper. Private keys are generated
-only on the target host under `/var/lib/sb-guard/keys` and are excluded from
-Git.
+shim builders, the shared build-root helper and the optional
+`strazh-platform-guard`. Private keys are generated only on the target host
+under `/var/lib/sb-guard/keys` and are excluded from Git.
 
 ## Boot and threat model
 
@@ -545,6 +655,7 @@ for the out-of-band management model.
 ```bash
 strazh --status
 strazh --verify
+strazh --platform-status
 findmnt -no SOURCE,FSTYPE,OPTIONS /boot/efi
 lsblk -o NAME,FSTYPE,MOUNTPOINTS
 systemctl status sb-guard.path sb-guard.timer

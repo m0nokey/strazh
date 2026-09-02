@@ -42,5 +42,17 @@ grep -Fq 'Embedded GRUB signature enforcement missing' "$guard"
 grep -Fq 'verify_grub_sbat_section' "$guard"
 grep -Fq 'verify_shim_vendor_cert' "$guard"
 grep -Fq 'manifest.sha256' "$guard"
+grep -Fq -- '--purge-all-nvram' "$guard"
+grep -Fq 'NVRAM_PURGE_ALL' "$guard"
+
+host=lib/strazh_host_cli.sh
+grep -Fq 'Purge Other NVRAM Boot Entries' "$host"
+grep -Fq -- '--purge-nvram' "$host"
+grep -Fq -- '--purge-all-nvram' "$guard"
+grep -Fq 'NVRAM_PURGE_ALL' "$guard"
+
+host=lib/strazh_host_cli.sh
+grep -Fq 'Purge Other NVRAM Boot Entries' "$host"
+grep -Fq -- '--purge-nvram' "$host"
 
 printf '%s\n' 'ARTIFACT_CONTRACT_OK (GRUB, shim, SBAT, GPG and single-signature checks present)'

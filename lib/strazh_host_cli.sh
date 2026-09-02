@@ -3,7 +3,8 @@
 #
 # The repository run.sh owns the initial installation pipeline.  This command
 # remains available after that directory is removed and provides the safe,
-# interactive FDE passphrase rotation and read-only verification operations.
+# interactive FDE passphrase rotation, verification and explicit NVRAM
+# maintenance operations.
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
@@ -11,6 +12,10 @@ umask 077
 STATE_FILE="/var/lib/strazh/pipeline.state"
 PIPELINE_LOCK_FILE="/run/strazh-pipeline.lock"
 SB_GUARD_LOCK_FILE="/run/sb-guard.lock"
+KEY_VAULT_CMD="/usr/local/sbin/strazh-key-vault"
+KEY_VAULT_GENERATION="generation-1"
+PLATFORM_GUARD_CMD="/usr/local/sbin/strazh-platform-guard"
+PLATFORM_FIRMWARE_IMAGE=""
 FDE_KEYFILE_PATH="/etc/cryptsetup-keys.d/root.key"
 FDE_MIN_PASSPHRASE_LENGTH="${STRAZH_FDE_MIN_PASSPHRASE_LENGTH:-12}"
 PBKDF2_ITER_TIME_MS="${STRAZH_PBKDF2_ITER_TIME_MS:-5000}"
@@ -128,6 +133,75 @@ with_pipeline_lock() {
     return "$rc"
 }
 
+key_vault_command() {
+    [[ -x "$KEY_VAULT_CMD" ]] || die "Private-key vault is not installed"
+    "$KEY_VAULT_CMD" "$@"
+}
+
+key_vault_is_open() {
+    key_vault_command status "$KEY_VAULT_GENERATION" 2>/dev/null |
+        grep -q '^mapping=open$'
+}
+
+key_vault_open() {
+    key_vault_command open "$KEY_VAULT_GENERATION"
+    key_vault_command link "$KEY_VAULT_GENERATION" >/dev/null 2>&1 ||
+        die "Cannot link private signing material from the key vault"
+    log 'Private-key vault is open for signing and boot-update operations.'
+}
+
+worker_events_pending() {
+    compgen -G '/var/lib/sb-guard/events/refresh.*' >/dev/null 2>&1
+}
+
+wait_for_sb_guard_idle() {
+    local timeout="${STRAZH_WORKER_WAIT_SECONDS:-1800}" elapsed=0
+    [[ "$timeout" =~ ^[1-9][0-9]*$ ]] ||
+        die 'STRAZH_WORKER_WAIT_SECONDS must be a positive integer'
+    command -v systemctl >/dev/null 2>&1 || return 0
+    [[ -x /usr/local/sbin/sb-guard-worker ]] || return 0
+
+    while systemctl is-active --quiet sb-guard.service || worker_events_pending; do
+        # APT hooks normally start the worker themselves. Starting it here
+        # closes the race where --vault-close is run immediately after apt
+        # returns but before systemd has scheduled the queued reconcile.
+        if ! systemctl is-active --quiet sb-guard.service && worker_events_pending; then
+            systemctl start --no-block sb-guard.service >/dev/null 2>&1 || true
+        fi
+        if ((elapsed >= timeout)); then
+            die "Timed out waiting for sb-guard worker; vault remains open"
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+}
+
+key_vault_close() {
+    if ! key_vault_is_open; then
+        key_vault_command close "$KEY_VAULT_GENERATION"
+        log 'Private-key vault is already closed.'
+        return 0
+    fi
+    wait_for_sb_guard_idle
+    key_vault_command close "$KEY_VAULT_GENERATION"
+    log 'Private-key vault is closed.'
+}
+
+with_key_vault() (
+    local opened_here=0 rc
+    trap 'if ((opened_here == 1)); then key_vault_close >/dev/null 2>&1 || true; fi' EXIT
+    if ! key_vault_is_open; then
+        key_vault_open || return $?
+        # shellcheck disable=SC2034 # consumed by the EXIT trap above.
+        opened_here=1
+    fi
+    set +e
+    "$@"
+    rc=$?
+    set -e
+    return "$rc"
+)
+
 root_luks_device() {
     local root_source dev
     root_source="$(findmnt -nro SOURCE / 2>/dev/null || true)"
@@ -239,6 +313,7 @@ state_value() {
 }
 
 show_status() {
+    local platform_mode vault_container vault_mapping
     ui_heading 'Strazh — host status'
     printf '  phase=%s\n' "$(state_value phase || true)"
     printf '  fde_ready=%s\n' "$(state_value phase | grep -Eq 'complete|secure_boot|release' && printf yes || printf unknown)"
@@ -246,6 +321,23 @@ show_status() {
         printf '  sb_guard=installed\n'
     else
         printf '  sb_guard=not-installed\n'
+    fi
+    if [[ -x "$PLATFORM_GUARD_CMD" ]]; then
+        platform_mode="$($PLATFORM_GUARD_CMD status 2>/dev/null |
+            awk -F= '$1 == "mode" { print $2; exit }' || true)"
+        printf '  platform_guard=%s\n' "${platform_mode:-unknown}"
+    else
+        printf '  platform_guard=not-installed\n'
+    fi
+    if [[ -x "$KEY_VAULT_CMD" ]]; then
+        vault_container="$(key_vault_command status "$KEY_VAULT_GENERATION" 2>/dev/null |
+            awk -F= '$1 == "container" { print $2; exit }' || true)"
+        vault_mapping="$(key_vault_command status "$KEY_VAULT_GENERATION" 2>/dev/null |
+            awk -F= '$1 == "mapping" { print $2; exit }' || true)"
+        printf '  key_vault=%s\n' "${vault_container:-unknown}"
+        printf '  key_vault_mapping=%s\n' "${vault_mapping:-unknown}"
+    else
+        printf '  key_vault=not-installed\n'
     fi
 }
 
@@ -260,7 +352,7 @@ reconcile_boot_files() {
         log "Boot reconciliation cancelled; no changes were made"
         return 0
     }
-    /usr/local/sbin/sb-guard-svc --fix-all
+    with_key_vault /usr/local/sbin/sb-guard-svc --fix-all
 }
 
 restore_last_good() {
@@ -271,6 +363,138 @@ restore_last_good() {
         return 0
     }
     /usr/local/sbin/sb-guard-rollback --restore
+}
+
+purge_all_nvram() {
+    [[ -x /usr/local/sbin/sb-guard-svc ]] || die "sb-guard-svc is not installed"
+    printf '%sWARNING: this removes every firmware Boot#### entry except the current Strazh shim.%s\n' \
+        "$WARN" "$RESET" >&2
+    printf '%sFirmware setup/recovery entries will also be removed and may be recreated by firmware.%s\n' \
+        "$WARN" "$RESET" >&2
+    ui_confirm 'Keep only the current Strazh shim NVRAM entry?' || {
+        log "NVRAM purge cancelled; no changes were made"
+        return 0
+    }
+    /usr/local/sbin/sb-guard-svc --purge-all-nvram
+}
+
+platform_guard_command() {
+    local -a args=("$@")
+    [[ -x "$PLATFORM_GUARD_CMD" ]] || die "Optional platform guard is not installed"
+    if [[ -n "$PLATFORM_FIRMWARE_IMAGE" ]]; then
+        args+=(--firmware-image "$PLATFORM_FIRMWARE_IMAGE")
+    fi
+    "$PLATFORM_GUARD_CMD" "${args[@]}"
+}
+
+platform_guard_menu() {
+    local choice
+    while true; do
+        ui_clear
+        ui_heading 'Strazh — optional platform integrity'
+        echo
+        ui_option 1 'Show Platform Status' \
+            'Display the board and firmware baseline digests'
+        ui_option 2 'Verify Platform Integrity' \
+            'Compare the current board and firmware identity with the baseline'
+        ui_option 3 'Enable Platform Guard' \
+            'Capture a baseline and enable optional host-side monitoring'
+        ui_option 4 'Pause for BIOS Update' \
+            'Open one explicit maintenance window before changing firmware'
+        ui_option 5 'Capture After BIOS Update' \
+            'Record the new firmware candidate without approving it'
+        ui_option 6 'Finalize BIOS Update' \
+            'Require an unchanged board and approve the new firmware baseline'
+        echo
+        ui_control x 'Back'
+        echo
+        read -r -p "${BLUE}?:${RESET} " choice || return 0
+        ui_clear
+        case "$choice" in
+            1)
+                platform_guard_command status || :
+                ui_return_to_menu
+                ;;
+            2)
+                if ! with_pipeline_lock platform_guard_command verify; then
+                    :
+                fi
+                ui_return_to_menu
+                ;;
+            3)
+                if ! with_pipeline_lock platform_guard_command enable; then
+                    :
+                fi
+                ui_return_to_menu
+                ;;
+            4)
+                if ! with_pipeline_lock platform_guard_command disable-for-update; then
+                    :
+                fi
+                ui_return_to_menu
+                ;;
+            5)
+                if ! with_pipeline_lock platform_guard_command capture-after-update; then
+                    :
+                fi
+                ui_return_to_menu
+                ;;
+            6)
+                if ! with_pipeline_lock platform_guard_command finalize-update; then
+                    :
+                fi
+                ui_return_to_menu
+                ;;
+            x|X) return 0 ;;
+            *)
+                printf '%sUnknown menu option: %s%s\n' "$WARN" "$choice" "$RESET" >&2
+                ui_return_to_menu
+                ;;
+        esac
+    done
+}
+
+key_vault_menu() {
+    local choice
+    while true; do
+        ui_clear
+        ui_heading 'Strazh — private-key vault'
+        echo
+        ui_option 1 'Show Vault Status' \
+            'Display the protected container and mapping state'
+        ui_option 2 'Unlock Vault' \
+            'Enter the vault passphrase for a signing or update operation'
+        ui_option 3 'Close Vault' \
+            'Unmount and close the private-key container'
+        echo
+        ui_control x 'Back'
+        echo
+        read -r -p "${BLUE}?:${RESET} " choice || return 0
+        ui_clear
+        case "$choice" in
+            1)
+                key_vault_command status "$KEY_VAULT_GENERATION" || :
+                ui_return_to_menu
+                ;;
+            2)
+                if ! with_pipeline_lock key_vault_open; then
+                    :
+                fi
+                ui_return_to_menu
+                ;;
+            3)
+                if ! with_pipeline_lock key_vault_close; then
+                    :
+                fi
+                ui_return_to_menu
+                ;;
+            x|X) return 0 ;;
+            *)
+                printf '%sUnknown menu option: %s%s\n' "$WARN" "$choice" "$RESET"
+                ui_return_to_menu
+                ;;
+        esac
+    done
 }
 
 draw_menu() {
@@ -286,19 +510,32 @@ draw_menu() {
         'Build, verify and atomically deploy the approved boot set'
     ui_option 5 'Restore Last Known-good Boot Set' \
         'Restore the verified rollback copy after a failed update'
+    ui_option 6 'Purge Other NVRAM Boot Entries' \
+        'Keep only the current Strazh shim entry; remove every other Boot#### record'
+    ui_option 7 'Private-key Vault' \
+        'Unlock or close the encrypted container used for signing operations'
+    ui_option 8 'Platform Integrity Guard' \
+        'Optionally monitor board and firmware identity across BIOS updates'
     echo
     ui_control x 'Exit'
     echo
 }
 
 usage() {
-    printf 'Usage: %s [--menu|--status|--change-fde-passphrase|--verify|--reconcile|--restore]\n' "$0"
+    printf 'Usage: %s [--menu|--status|--change-fde-passphrase|--verify|--reconcile|--restore|--purge-nvram|--platform-*]\n' "$0"
     printf '%s\n' '--menu: open the interactive host administration menu.'
     printf '%s\n' '--status: show the saved installation state.'
     printf '%s\n' '--change-fde-passphrase: rotate one root LUKS2 passphrase interactively.'
     printf '%s\n' '--verify: run strict Secure Boot verification.'
     printf '%s\n' '--reconcile: verify and atomically reconcile the approved boot files.'
     printf '%s\n' '--restore: restore the last known-good boot set after confirmation.'
+    printf '%s\n' '--purge-nvram: keep only the current Strazh shim NVRAM entry after confirmation.'
+    printf '%s\n' '--platform-status/--platform-verify: inspect or verify the optional platform guard.'
+    printf '%s\n' '--platform-enable: capture and enable the optional platform guard.'
+    printf '%s\n' '--platform-disable-for-update: pause it for one BIOS update window.'
+    printf '%s\n' '--platform-capture-after-update/--platform-finalize-update: review and approve new firmware.'
+    printf '%s\n' '--firmware-image PATH: include an exact vendor firmware image in the platform operation.'
+    printf '%s\n' '--vault-status/--vault-open/--vault-close: inspect or control the private-key vault.'
 }
 
 menu() {
@@ -338,6 +575,18 @@ menu() {
                 fi
                 ui_return_to_menu
                 ;;
+            6)
+                if ! with_pipeline_lock purge_all_nvram; then
+                    :
+                fi
+                ui_return_to_menu
+                ;;
+            7)
+                key_vault_menu
+                ;;
+            8)
+                platform_guard_menu
+                ;;
             x|X) return 0 ;;
             *)
                 die "Unknown menu option: $choice"
@@ -356,6 +605,21 @@ main() {
             --verify) mode=verify ;;
             --reconcile) mode=reconcile ;;
             --restore|--rollback) mode=restore ;;
+            --purge-nvram) mode=purge-nvram ;;
+            --platform-status) mode=platform-status ;;
+            --platform-verify) mode=platform-verify ;;
+            --platform-enable) mode=platform-enable ;;
+            --platform-disable-for-update) mode=platform-disable-for-update ;;
+            --platform-capture-after-update) mode=platform-capture-after-update ;;
+            --platform-finalize-update) mode=platform-finalize-update ;;
+            --firmware-image)
+                [[ $# -ge 2 ]] || die '--firmware-image requires a path'
+                PLATFORM_FIRMWARE_IMAGE="$2"
+                shift
+                ;;
+            --vault-status) mode=vault-status ;;
+            --vault-open) mode=vault-open ;;
+            --vault-close) mode=vault-close ;;
             -h|--help) usage; return 0 ;;
             *) die "Unknown argument: $1" ;;
         esac
@@ -371,6 +635,7 @@ main() {
     need_cmd grep
     need_cmd mktemp
     need_cmd stat
+    need_cmd sed
 
     case "$mode" in
         menu) menu ;;
@@ -379,6 +644,16 @@ main() {
         verify) with_locks verify_secure_boot ;;
         reconcile) with_pipeline_lock reconcile_boot_files ;;
         restore) with_pipeline_lock restore_last_good ;;
+        purge-nvram) with_pipeline_lock purge_all_nvram ;;
+        platform-status) platform_guard_command status ;;
+        platform-verify) with_pipeline_lock platform_guard_command verify ;;
+        platform-enable) with_pipeline_lock platform_guard_command enable ;;
+        platform-disable-for-update) with_pipeline_lock platform_guard_command disable-for-update ;;
+        platform-capture-after-update) with_pipeline_lock platform_guard_command capture-after-update ;;
+        platform-finalize-update) with_pipeline_lock platform_guard_command finalize-update ;;
+        vault-status) key_vault_command status "$KEY_VAULT_GENERATION" ;;
+        vault-open) with_pipeline_lock key_vault_open ;;
+        vault-close) with_pipeline_lock key_vault_close ;;
     esac
 }
 
